@@ -1,0 +1,11 @@
+llama.cpp b10706 · win-cpu-x64
+https://github.com/ggml-org/llama.cpp/releases/tag/b10706
+
+이 폴더에는 llama-server 하나를 돌리는 데 필요한 것만 들어 있습니다.
+ggml-cpu-*.dll 은 CPU 세대별 판입니다. ggml-base 가 그 PC 에 맞는 것을
+실행 중에 골라 부르므로, 오래된 PC 든 최신 PC 든 이대로 돌아갑니다.
+CUDA·Vulkan 판은 넣지 않았습니다 — CLAUDE.md 의 'CUDA 없는 PC에서
+동작해야 합니다' 를 지키기 위해서입니다.
+
+Windows on ARM(스냅드래곤) PC 도 x64 를 에뮬레이션으로 돌리므로 이대로 됩니다.
+더 빠르게 하려면 같은 릴리스의 win-cpu-arm64 판으로 이 폴더를 통째로 바꾸면 됩니다.

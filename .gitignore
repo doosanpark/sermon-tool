@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+data/
+.env
+.hf_token
+bin/*.exe
+dist/
+build/
+Output/

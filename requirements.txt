@@ -1,0 +1,17 @@
+# 예배영상 설교/축도 자동추출
+
+# --- 기본 (성문 검출 · CPU 전용, torch 불필요) ---
+yt-dlp>=2026.1.1
+sherpa-onnx>=1.13
+numpy>=1.24
+
+# --- GUI ---
+PySide6>=6.6
+
+# --- 선택: 자막(STT) ---
+faster-whisper>=1.0.0
+
+# --- 선택: 성문 없이 화자분리로 돌릴 때만 (무겁습니다) ---
+# torch>=2.2
+# torchaudio>=2.2
+# pyannote.audio>=3.1

@@ -117,6 +117,15 @@ class Config:
     subtitle_font: str = "Malgun Gothic"
     subtitle_size: int = 22
 
+    # --- 다시 인코딩할 때의 화질 (정확히 자르기 · 자막 태우기) ---
+    # crf 는 낮을수록 좋고 파일이 커진다. preset 은 느릴수록 같은 crf 에서 조금 더 좋다.
+    # 실측(720p 60초, 원본 대비 SSIM): crf20 veryfast 0.9948 → crf18 medium 0.9976.
+    # 손실은 crf 20→18 에서 거의 다 줄고, 프리셋은 medium 까지가 남은 몫을 채운다.
+    # 40분 설교 기준 12스레드 PC 에서 약 3~4분. 느린 PC 에서 너무 오래 걸리면
+    # preset 을 "fast" 로 낮춘다 (SSIM 0.9974, 시간은 3/4).
+    video_crf: int = 18
+    video_preset: str = "medium"
+
     # --- 3분 요약 (세로 숏폼) ---
     # 목표 길이. 3분이 기본이고, 너무 잘게 끊긴다 싶으면 늘리면 된다.
     summary_target: float = 180.0
@@ -125,10 +134,18 @@ class Config:
     # 고정 카메라라 한 번 맞춰 두면 계속 쓴다 — [고급 설정] 에서 미리보기로 맞춘다.
     shorts_center_x: float = 0.44   # 목사님 가로 위치 (실측: 화면의 40~45% 지점)
     shorts_center_y: float = 0.61   # 세로 위치. 머리 위 여백이 남게 잡은 값
-    shorts_zoom: float = 0.515      # 원본 높이의 몇 배를 담을지. 작을수록 크게
+    # 0.515 는 목사님이 너무 크게 잡혀 720p 원본에서 351x370 을 1140 으로 3.1배 키웠다.
+    # 1.2배 넓힌 0.618 은 422x445 를 2.6배만 키우므로 덜 뭉개진다 (2026-09-15).
+    shorts_zoom: float = 0.800      # 원본 높이의 몇 배를 담을지. 작을수록 크게
     shorts_sub_size: int = 62       # 세로 화면 자막 크기 (1080x1920 픽셀 그대로)
-    shorts_crf: int = 20
-    shorts_preset: str = "veryfast"
+    shorts_crf: int = 18
+    shorts_preset: str = "medium"    # 3분짜리라 medium 이어도 몇 분이면 끝난다
+    # 확대 화질. 720p 원본에서 350x370 쯤을 잘라 1080x1140 으로 약 3배 키우는데,
+    # 그냥 키우면 압축 블록까지 3배로 커진다. 작을 때 블록을 살짝 뭉개고(hqdn3d)
+    # → lanczos 로 키우고 → 키운 뒤 윤곽만 되살린다(cas). 비우거나 0 이면 그 단계를 건너뛴다.
+    shorts_denoise: str = "hqdn3d=2:1.5:4:3"
+    shorts_scaler: str = "lanczos"
+    shorts_sharpen: float = 0.5       # cas 세기 0~1. 0.7 넘으면 링잉이 보이기 시작한다
 
     # --- 요약 문장 고르기: 임베딩 + 로컬 LLM ---
     # 둘 다 없어도 3분 요약은 규칙만으로 돌아간다. 있으면 더 잘 고른다.

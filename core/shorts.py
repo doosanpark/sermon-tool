@@ -71,15 +71,33 @@ def crop_rect(src_w: int, src_h: int, cx: float, cy: float, zoom: float
 
 
 def _compose_graph(runs: list[tuple[float, float]], w: int, h: int, x: int, y: int,
-                   fps: float, audio_chain: str) -> str:
-    """조각마다 잘라 세로로 맞추고 이어붙이는 필터 그래프."""
+                   fps: float, audio_chain: str, denoise: str = "",
+                   scaler: str = "", sharpen: float = 0.0,
+                   region: bool = False) -> str:
+    """조각마다 잘라 세로로 맞추고 이어붙이는 필터 그래프.
+
+    확대 화질: 720p 원본에서 350x370 쯤을 잘라 1080x1140 으로 약 3배 키운다.
+    그냥 키우면 원본(0.5Mbps 라이브 재인코딩)의 압축 블록까지 3배로 커진다.
+    그래서 순서가 정해져 있다. 작을 때 블록을 살짝 뭉개고(denoise, 픽셀이 적어
+    싸다) → lanczos 로 키우고(윤곽 보존) → 키운 뒤 윤곽만 되살린다(cas).
+    없는 디테일을 만들지는 못한다. 안경테·태블릿 모서리·나무결이 조금 사는 정도다.
+    """
+    scale = f"scale={WIDTH}:{VIDEO_H}" + (f":flags={scaler}" if scaler else "")
+    post = f"cas={sharpen:.2f}" if sharpen > 0 else ""
+    if region:
+        # 두 번째 입력([1:v])이 이미 잘라 키워 둔 조각이다 (AI 초해상 등). 잡음 완화와
+        # 선명화는 그쪽에서 끝났으므로 크기만 맞춘다. 소리는 여전히 원본([0:a])에서 온다.
+        vin, vchain = "[1:v]", f"scale={WIDTH}:{VIDEO_H}:flags=lanczos"
+    else:
+        vin, vchain = "[0:v]", ",".join(
+            p for p in (f"crop={w}:{h}:{x}:{y}", denoise, scale, post) if p)
     parts, labels = [], []
     for i, (start, end) in enumerate(runs):
         dur = end - start
         fo = max(0.0, dur - FADE)
         parts.append(
-            f"[0:v]trim=start={start:.3f}:end={end:.3f},setpts=PTS-STARTPTS,"
-            f"crop={w}:{h}:{x}:{y},scale={WIDTH}:{VIDEO_H},"
+            f"{vin}trim=start={start:.3f}:end={end:.3f},setpts=PTS-STARTPTS,"
+            f"{vchain},"
             f"fps={fps:.3f},setsar=1[v{i}]"
         )
         parts.append(
@@ -173,11 +191,23 @@ def srt_to_ass(srt_text: str, font: str, size: int, margin_v: int = 205) -> str:
 
 
 def build(src: Path, runs: list[tuple[float, float]], out_path: Path, cfg,
-          title: str = "", verse: str = "", srt_text: str = "") -> Path:
-    """세로 요약 영상을 만든다. 조각 자르기·이어붙이기·자막을 한 번에 한다."""
+          title: str = "", verse: str = "", srt_text: str = "",
+          region: Path | None = None) -> Path:
+    """세로 요약 영상을 만든다. 조각 자르기·이어붙이기·자막을 한 번에 한다.
+
+    region 은 선택이다. 원본과 시간이 맞는, 목사님 자리(crop_rect)만 미리 잘라
+    AI 초해상 등으로 키워 둔 영상을 주면 그 화면을 쓴다. 해상도는 무엇이든 된다.
+    소리·구간·자막·제목은 그대로 원본 기준으로 처리한다. 교회 PC 에는 GPU 가
+    없으므로 기본 경로에서는 쓰지 않는다. 실측(2026-09-15, RTX 4060 Ti):
+    Real-ESRGAN x4plus 1.8fps, animevideov3 12fps, FlashVSR 0.05fps(8GB 로는 부족).
+    """
     src, out_path = Path(src), Path(out_path)
     if not src.exists():
         raise ToolError(f"원본 영상이 없습니다: {src}")
+    if region is not None:
+        region = Path(region)
+        if not region.exists():
+            raise ToolError(f"미리 키워 둔 조각 영상이 없습니다: {region}")
     if not runs:
         raise ToolError("고른 문장이 없습니다. 문장을 몇 개 골라 주세요.")
 
@@ -210,7 +240,20 @@ def build(src: Path, runs: list[tuple[float, float]], out_path: Path, cfg,
             (tmpdir / "title.txt").write_text(title or "", encoding="utf-8")
             (tmpdir / "verse.txt").write_text(verse or "", encoding="utf-8")
 
-        graph = _compose_graph(runs, w, h, x, y, params["fps"], chain)
+        denoise = str(getattr(cfg, "shorts_denoise", "") or "")
+        scaler = str(getattr(cfg, "shorts_scaler", "") or "")
+        sharpen = float(getattr(cfg, "shorts_sharpen", 0.0) or 0.0)
+        if region is not None:
+            rp = cut_mod.video_params(region)
+            print(f"  미리 키워 둔 조각을 씁니다: {region.name} ({rp['width']}x{rp['height']})")
+        else:
+            steps = [name for name, on in (("키우기 전 잡음 완화", denoise),
+                                           (f"{scaler} 확대", scaler),
+                                           (f"윤곽 되살리기 {sharpen:.1f}", sharpen > 0)) if on]
+            if steps:
+                print("  확대 화질: " + " → ".join(steps))
+        graph = _compose_graph(runs, w, h, x, y, params["fps"], chain,
+                               denoise, scaler, sharpen, region=region is not None)
 
         vf_extra = _title_filters(font, title, verse)
         if srt_text.strip():
@@ -228,6 +271,7 @@ def build(src: Path, runs: list[tuple[float, float]], out_path: Path, cfg,
         run_stream([
             require("ffmpeg"), "-y", "-hide_banner", "-loglevel", "error", "-stats",
             "-i", str(src.resolve()),
+            *(["-i", str(region.resolve())] if region is not None else []),
             "-filter_complex", graph,
             "-map", vmap, "-map", "[a]",
             "-c:v", "libx264", "-preset", cfg.shorts_preset, "-crf", str(cfg.shorts_crf),

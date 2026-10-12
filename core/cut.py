@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -25,6 +26,29 @@ DENOISE_FILTERS = {
     "light": "highpass=f=80,afftdn=nf=-25",        # -72.2dB · 목소리 손상 거의 없음
     "strong": "highpass=f=80,afftdn=nf=-35:nr=20",  # -78.3dB · 잡음이 심할 때
 }
+
+
+# 다시 인코딩할 때의 기본 화질. 설정(core/config.py 의 video_crf · video_preset)이
+# 있으면 그 값이 들어오고, 여기 값은 설정을 안 넘기는 자리(시작 영상 규격 맞추기,
+# 이어붙이기 폴백)에서 쓴다.
+#
+# 실측(720p 60초, 12스레드 CPU, 원본 대비 SSIM):
+#     crf20 veryfast  0.9948  27배속   ← 예전 기본값
+#     crf18 veryfast  0.9960  35배속
+#     crf18 fast      0.9974  16배속
+#     crf18 medium    0.9976  12배속   ← 지금 기본값
+# 손실은 crf 20→18 에서 거의 다 줄고, 프리셋은 medium 까지가 남은 몫을 채운다.
+# 같은 crf 에서 프리셋을 올리면 파일이 오히려 조금 커진다. 압축을 더 잘하는 게
+# 아니라 같은 화질 목표를 더 충실히 지키기 때문이다.
+VIDEO_CRF = 18
+VIDEO_PRESET = "medium"
+
+
+def sub_style(font: str = "Malgun Gothic", size: int = 22) -> str:
+    """자막 태우기 스타일. 자르기와 함께 태울 때와 따로 태울 때 같은 모양이어야 한다."""
+    return (f"FontName={font},FontSize={size},PrimaryColour=&H00FFFFFF,"
+            "OutlineColour=&H90000000,BorderStyle=3,Outline=1,Shadow=0,"
+            "MarginV=28,Alignment=2")
 
 
 def audio_chain(denoise: str = "", normalize: bool = True,
@@ -51,10 +75,16 @@ def loudnorm_filter(lufs: float = -16.0, peak: float = -1.5) -> str:
 
 
 def cut_reencode(src: Path, ranges: list[tuple[float, float]], out_path: Path,
-                 crf: int = 20, preset: str = "veryfast",
+                 crf: int = VIDEO_CRF, preset: str = VIDEO_PRESET,
                  normalize: bool = True, lufs: float = -16.0, peak: float = -1.5,
-                 denoise: str = "") -> Path:
-    """정확한 컷. 한 번의 ffmpeg 호출로 trim + concat 을 끝낸다."""
+                 denoise: str = "", burn_srt: Path | None = None,
+                 font: str = "Malgun Gothic", size: int = 22) -> Path:
+    """정확한 컷. 한 번의 ffmpeg 호출로 trim + concat 을 끝낸다.
+
+    burn_srt 를 주면 자막까지 같은 호출에서 태운다. 자른 뒤 따로 태우면 화면을
+    두 번 인코딩해 손실이 두 번 쌓이고(실측 SSIM 0.9948 → 0.9928) 시간도 두 배다.
+    자막 시각은 이어붙인 타임라인 기준이어야 한다 (export.build_srt 가 그렇게 만든다).
+    """
     if not ranges:
         raise ToolError("자를 구간이 없습니다.")
 
@@ -67,24 +97,33 @@ def cut_reencode(src: Path, ranges: list[tuple[float, float]], out_path: Path,
         )
         labels.append(f"[v{i}][a{i}]")
 
+    vlabel = "[vraw]" if burn_srt else "[v]"
     graph = (";".join(parts) + ";" + "".join(labels)
-             + f"concat=n={len(ranges)}:v=1:a=1[v][araw]")
+             + f"concat=n={len(ranges)}:v=1:a=1{vlabel}[araw]")
 
     # 잡음 제거·음량 맞추기를 여기서 같이 태운다. 예전에는 인자만 받고 쓰지
     # 않아서, [정확히 자르기] 를 켜면 소리가 원본 그대로 나갔다.
     chain = audio_chain(denoise, normalize, lufs, peak)
     graph += f";[araw]{chain}[a]" if chain else ";[araw]anull[a]"
 
-    run_stream([
-        require("ffmpeg"), "-y", "-hide_banner", "-loglevel", "error", "-stats",
-        "-i", str(src),
-        "-filter_complex", graph,
-        "-map", "[v]", "-map", "[a]",
-        "-c:v", "libx264", "-preset", preset, "-crf", str(crf),
-        "-c:a", "aac", "-b:a", "192k",
-        "-movflags", "+faststart",
-        str(out_path),
-    ], tag="[ffmpeg] ", total=sum(e - s for s, e in ranges))
+    # 윈도우 절대경로를 필터 안에 넣으면 콜론과 역슬래시가 문법으로 읽혀 깨진다.
+    # 자막 파일을 임시 폴더에 복사해 두고 작업 폴더를 거기로 옮겨 이름만 넘긴다.
+    with tempfile.TemporaryDirectory() as tmp:
+        cwd = None
+        if burn_srt:
+            shutil.copyfile(burn_srt, Path(tmp) / "sub.srt")
+            graph += f";[vraw]subtitles=sub.srt:force_style='{sub_style(font, size)}'[v]"
+            cwd = tmp
+        run_stream([
+            require("ffmpeg"), "-y", "-hide_banner", "-loglevel", "error", "-stats",
+            "-i", str(Path(src).resolve()),
+            "-filter_complex", graph,
+            "-map", "[v]", "-map", "[a]",
+            "-c:v", "libx264", "-preset", preset, "-crf", str(crf),
+            "-c:a", "aac", "-b:a", "192k",
+            "-movflags", "+faststart",
+            str(Path(out_path).resolve()),
+        ], tag="[ffmpeg] ", total=sum(e - s for s, e in ranges), cwd=cwd)
     return out_path
 
 
@@ -118,7 +157,7 @@ def video_params(path: Path) -> dict:
 
 
 def _match_format(src: Path, params: dict, out_path: Path,
-                  crf: int = 20, preset: str = "veryfast") -> Path:
+                  crf: int = VIDEO_CRF, preset: str = VIDEO_PRESET) -> Path:
     """시작 영상을 본 영상과 같은 규격으로 다시 만든다.
 
     크기가 다르면 비율을 지킨 채 줄이고 남는 자리는 검게 채운다(pad).
@@ -178,7 +217,8 @@ def prepend_intro(video: Path, intro: Path) -> float:
                                str(merged)], tag="[ffmpeg] ")
         except ToolError:
             print("  빠른 이어붙이기가 안 돼 다시 인코딩합니다 (조금 걸립니다)")
-            run_stream(base + ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            run_stream(base + ["-c:v", "libx264", "-preset", VIDEO_PRESET,
+                               "-crf", str(VIDEO_CRF),
                                "-c:a", "aac", "-b:a", "192k",
                                "-movflags", "+faststart", str(merged)],
                        tag="[ffmpeg] ")
@@ -323,19 +363,18 @@ def embed_subtitles(video: Path, srt: Path) -> Path:
 
 
 def burn_subtitles(video: Path, srt: Path, font: str = "Malgun Gothic",
-                   size: int = 22, crf: int = 20, preset: str = "veryfast") -> Path:
-    """자막을 화면에 태워 넣는다. 어디서나 보이지만 끌 수 없다.
+                   size: int = 22, crf: int = VIDEO_CRF, preset: str = VIDEO_PRESET) -> Path:
+    """이미 만들어진 영상에 자막을 태워 넣는다. 어디서나 보이지만 끌 수 없다.
 
-    화면을 전부 다시 그리므로 40분 분량에 20~30분 걸린다.
+    화면을 전부 다시 그리므로 40분 분량에 20~30분 걸린다. 로컬 영상 내보내기는
+    이 함수를 쓰지 않는다. cut_reencode 가 자르기와 함께 한 번에 태운다.
+    유튜브에서 구간을 받아 잇는 export() 처럼 영상이 이미 있을 때만 쓴다.
     """
     ffmpeg = require("ffmpeg")
     tmp = video.with_name(video.stem + ".burn.mp4")
 
     # 윈도우 경로의 콜론·역슬래시는 필터 문법과 충돌하므로 작업 폴더를 옮겨 파일명만 쓴다
-    style = (f"FontName={font},FontSize={size},PrimaryColour=&H00FFFFFF,"
-             "OutlineColour=&H90000000,BorderStyle=3,Outline=1,Shadow=0,"
-             "MarginV=28,Alignment=2")
-    vf = f"subtitles={srt.name}:force_style='{style}'"
+    vf = f"subtitles={srt.name}:force_style='{sub_style(font, size)}'"
 
     try:
         total = ffprobe_duration(video)
@@ -355,7 +394,10 @@ def burn_subtitles(video: Path, srt: Path, font: str = "Malgun Gothic",
 
 def cut(src: Path, ranges: list[tuple[float, float]], out_path: Path,
         reencode: bool = True, normalize: bool = True,
-        lufs: float = -16.0, peak: float = -1.5, denoise: str = "") -> Path:
+        lufs: float = -16.0, peak: float = -1.5, denoise: str = "",
+        crf: int = VIDEO_CRF, preset: str = VIDEO_PRESET,
+        burn_srt: Path | None = None,
+        font: str = "Malgun Gothic", size: int = 22) -> Path:
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if out_path.exists():
@@ -375,9 +417,15 @@ def cut(src: Path, ranges: list[tuple[float, float]], out_path: Path,
         print("  10초 미만 구간이 있어 정확한 컷(재인코딩)으로 전환합니다")
         reencode = True
 
+    # 자막을 태우려면 어차피 화면을 다시 그려야 한다. 그러면 정확한 컷이 공짜다.
+    if burn_srt and not reencode:
+        print("  자막을 태우므로 정확한 컷(재인코딩)으로 전환합니다 (시간은 같고 손실은 한 번뿐)")
+        reencode = True
+
     if reencode:
-        return cut_reencode(src, ranges, out_path, normalize=normalize,
-                            lufs=lufs, peak=peak, denoise=denoise)
+        return cut_reencode(src, ranges, out_path, crf=crf, preset=preset,
+                            normalize=normalize, lufs=lufs, peak=peak,
+                            denoise=denoise, burn_srt=burn_srt, font=font, size=size)
 
     cut_copy(src, ranges, out_path)
     if normalize or denoise:

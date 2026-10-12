@@ -54,7 +54,8 @@ def _concat(clips: list[Path], out_path: Path) -> Path:
             run([
                 ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
                 "-f", "concat", "-safe", "0", "-i", str(listfile),
-                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                "-c:v", "libx264", "-preset", cut_mod.VIDEO_PRESET,
+                "-crf", str(cut_mod.VIDEO_CRF),
                 "-c:a", "aac", "-b:a", "192k",
                 "-movflags", "+faststart", str(out_path),
             ])
@@ -371,23 +372,46 @@ def export_mp3(marker: Marker, cfg: Config, src: Path,
 def export_local(marker: Marker, cfg: Config, src: Path,
                  transcript: list[dict] | None = None,
                  reencode: bool = True) -> dict[str, Path]:
-    """이미 받아둔 로컬 영상에서 잘라 이어붙인다. 다시 받지 않으므로 빠르다."""
+    """이미 받아둔 로컬 영상에서 잘라 이어붙인다. 다시 받지 않으므로 빠르다.
+
+    자막을 태우는 설정이면 자르기와 태우기를 ffmpeg 한 번으로 끝낸다. 예전에는
+    자른 뒤 다시 태워 화면을 두 번 인코딩했다. 손실이 두 번 쌓이고 시간도 두 배였다.
+    태우기는 어차피 다시 인코딩하므로 이때는 빠른 컷을 골랐어도 정확한 컷이 된다.
+    """
     ranges = marker.ranges()
     if not ranges:
         raise ToolError("내보낼 구간이 없습니다.")
 
     cfg.ensure_dirs()
     final = cfg.export_dir / f"{safe_stem(marker)}.mp4"
-
     plain = [(s, e) for s, e, _ in ranges]
-    print(f"{len(plain)}개 구간을 {'정확히(재인코딩)' if reencode else '빠르게(스트림복사)'} 자릅니다")
-    if cfg.denoise:
-        print(f"  잡음 제거: {'약하게' if cfg.denoise == 'light' else '강하게'}")
-    if cfg.normalize_audio:
-        print(f"  소리 크기를 방송 표준({cfg.target_lufs:.0f} LUFS)에 맞춥니다")
-    cut_mod.cut(Path(src), plain, final, reencode=reencode,
-                normalize=cfg.normalize_audio, denoise=cfg.denoise,
-                lufs=cfg.target_lufs, peak=cfg.target_peak_db)
+
+    burn = bool(cfg.make_srt and transcript
+                and getattr(cfg, "subtitle_mode", "embed") == "burn")
+    burn_srt: Path | None = None
+    with tempfile.TemporaryDirectory() as tmp:
+        if burn:
+            # 태울 자막은 이어붙인 타임라인 기준이다. 시작 영상은 이 뒤에 앞으로
+            # 붙으므로 lead=0. 파일로 남기는 .srt 는 아래에서 lead 를 넣어 따로 만든다.
+            text = build_srt(ranges, [e - s for s, e in plain], transcript)
+            if text.strip():
+                burn_srt = Path(tmp) / "burn.srt"
+                burn_srt.write_text(text, encoding="utf-8")
+                reencode = True
+
+        print(f"{len(plain)}개 구간을 {'정확히(재인코딩)' if reencode else '빠르게(스트림복사)'} 자릅니다")
+        if burn_srt:
+            print("  자막을 화면에 태웁니다. 자르기와 한 번에 인코딩합니다 (화면을 다시 그리므로 오래 걸립니다)")
+        if cfg.denoise:
+            print(f"  잡음 제거: {'약하게' if cfg.denoise == 'light' else '강하게'}")
+        if cfg.normalize_audio:
+            print(f"  소리 크기를 방송 표준({cfg.target_lufs:.0f} LUFS)에 맞춥니다")
+        cut_mod.cut(Path(src), plain, final, reencode=reencode,
+                    normalize=cfg.normalize_audio, denoise=cfg.denoise,
+                    lufs=cfg.target_lufs, peak=cfg.target_peak_db,
+                    crf=getattr(cfg, "video_crf", cut_mod.VIDEO_CRF),
+                    preset=getattr(cfg, "video_preset", cut_mod.VIDEO_PRESET),
+                    burn_srt=burn_srt, font=cfg.subtitle_font, size=cfg.subtitle_size)
 
     result: dict[str, Path] = {"video": final}
     lead = _add_intro(final, cfg, result)
@@ -402,7 +426,12 @@ def export_local(marker: Marker, cfg: Config, src: Path,
             srt_path = final.with_suffix(".srt")
             srt_path.write_text(srt_text, encoding="utf-8")
             result["srt"] = srt_path
-            _apply_subtitles(final, srt_path, cfg, result)
+            if burn_srt is not None:
+                # 이미 태웠다. .srt 는 유튜브용으로 남기되 영상 옆에서 치운다.
+                _stash_srt(final, srt_path, result)
+                result["자막"] = "화면에 태움 (항상 보임)"
+            else:
+                _apply_subtitles(final, srt_path, cfg, result)
 
     return result
 

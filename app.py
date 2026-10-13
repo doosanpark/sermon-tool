@@ -462,6 +462,30 @@ class MainWindow(SummaryTab, QWidget):
         self.move(area.left() + (area.width() - w) // 2,
                   area.top() + max((area.height() - h) // 2, 0))
 
+    def _keep_on_screen(self) -> None:
+        """창 바깥 테두리(제목 표시줄 포함)가 작업 표시줄 위에 들어오게 고친다.
+
+        resize() 는 창 안쪽 크기만 정하고 제목 표시줄(배율 150% 에서 약 45px)은
+        그 위에 따로 붙는다. 그래서 계산상 꼭 맞아도 실제로는 아래가 작업 표시줄
+        뒤로 넘쳤다. 화면에 띄운 뒤 실제 바깥 크기를 재서 넘친 만큼 줄이고 올린다.
+        """
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is None or self.isMaximized():
+            return
+        area = screen.availableGeometry()
+        frame = self.frameGeometry()
+        extra = frame.height() - self.height()          # 제목 표시줄 + 테두리
+        if frame.height() > area.height():
+            self.resize(self.width(), max(area.height() - extra, self.minimumHeight()))
+            frame = self.frameGeometry()
+        top = frame.top()
+        if frame.bottom() > area.bottom():
+            top = max(area.top(), area.bottom() - frame.height() + 1)
+        if top < area.top():
+            top = area.top()
+        if top != frame.top():
+            self.move(frame.left(), top)
+
     # ============================================================== UI
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -476,11 +500,20 @@ class MainWindow(SummaryTab, QWidget):
         editor_scroll.setMinimumWidth(360)
         editor_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
+        # 영상 칸도 스크롤 안에 둔다. 영상·버튼·막대를 합친 최소 높이가 450px 남짓이라,
+        # 화면 배율 150% 노트북(쓸 수 있는 높이 약 670px)에서는 창이 화면보다 커져
+        # 아래 탭이 작업 표시줄 뒤로 숨었다. 이렇게 하면 창은 화면 안에 들어가고,
+        # 정말 모자랄 때만 영상 칸에 세로 스크롤이 생긴다.
+        player_scroll = QScrollArea()
+        player_scroll.setWidget(self._build_player())
+        player_scroll.setWidgetResizable(True)
+        player_scroll.setFrameShape(QFrame.NoFrame)
+        player_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
         middle = QSplitter(Qt.Horizontal)
-        middle.addWidget(self._build_player())
+        middle.addWidget(player_scroll)
         middle.addWidget(editor_scroll)
         middle.setSizes([880, 420])
-        root.addWidget(middle, 5)
 
         self.tabs = QTabWidget()
         self.subtitle_list = QListWidget()
@@ -502,7 +535,18 @@ class MainWindow(SummaryTab, QWidget):
             "background:#ffffff; color:#1c1e21;")
         self.tabs.addTab(self.log_view, "진행 로그")
         self.tabs.setMinimumHeight(130)
-        root.addWidget(self.tabs, 2)
+
+        # 위(영상·편집)와 아래(탭)를 끌어서 나눌 수 있게 한다. 노트북처럼 세로가 좁으면
+        # 고정 비율로는 [3분 요약] 탭의 목록과 버튼이 잘린다 (1366x768 에서 목록 한 줄).
+        self.vsplit = QSplitter(Qt.Vertical)
+        self.vsplit.addWidget(middle)
+        self.vsplit.addWidget(self.tabs)
+        self.vsplit.setChildrenCollapsible(False)
+        self.vsplit.setStretchFactor(0, 5)
+        self.vsplit.setStretchFactor(1, 2)
+        root.addWidget(self.vsplit, 1)
+        self._split_before_summary: list[int] | None = None
+        self.tabs.currentChanged.connect(self._on_tab_changed)
 
         self.hint = QLabel()
         self.hint.setStyleSheet("color:#555; padding:2px;")
@@ -519,6 +563,29 @@ class MainWindow(SummaryTab, QWidget):
 
         self.subtitle_list.itemClicked.connect(
             lambda it: self._seek(float(it.data(Qt.UserRole))))
+
+    def _on_tab_changed(self, _index: int) -> None:
+        """[3분 요약] 탭을 열면 아래 칸을 넓히고, 다른 탭으로 가면 원래대로 돌린다.
+
+        요약은 문장 목록을 읽으며 고르는 일이라 아래 칸이 넓어야 한다. 그 동안은
+        구간 경계를 만지지 않으므로 정밀 조정 줄을 접고 영상 칸을 줄여 높이를 낸다.
+        """
+        if not hasattr(self, "vsplit"):
+            return
+        on_summary = self.tabs.currentWidget() is self.summary_tab
+        if on_summary and self._split_before_summary is None:
+            self._split_before_summary = self.vsplit.sizes()
+            self.fine_box.setVisible(False)
+            self.video.setMinimumHeight(90)
+            total = sum(self.vsplit.sizes())
+            want = min(max(320, int(total * 0.5)), total - 200)
+            if self.tabs.height() < want:
+                self.vsplit.setSizes([total - want, want])
+        elif not on_summary and self._split_before_summary is not None:
+            self.fine_box.setVisible(True)
+            self.video.setMinimumHeight(150 if self._small_screen else 180)
+            self.vsplit.setSizes(self._split_before_summary)
+            self._split_before_summary = None
 
     def _build_toolbar(self) -> QWidget:
         box = QGroupBox("1. 영상 준비")
@@ -644,10 +711,16 @@ class MainWindow(SummaryTab, QWidget):
             "파란 ↔ 손잡이를 잡아 끌면 0.1초 단위 · 휠로 확대 · Ctrl+←/→ 로도 조정")
         self.zoom_hint.setStyleSheet("color:#666;")
         edge_row.addWidget(self.zoom_hint)
-        lay.addLayout(edge_row)
 
+        # 정밀 조정 줄과 확대 막대는 한 묶음으로 둔다. [3분 요약] 탭을 볼 때는
+        # 구간 경계를 만질 일이 없으므로 접어서 그 높이를 요약 목록에 준다.
+        self.fine_box = QWidget()
+        fine = QVBoxLayout(self.fine_box)
+        fine.setContentsMargins(0, 0, 0, 0)
+        fine.addLayout(edge_row)
         self.zoom_bar = ZoomBar()
-        lay.addWidget(self.zoom_bar)
+        fine.addWidget(self.zoom_bar)
+        lay.addWidget(self.fine_box)
 
         self.btn_edge_start.clicked.connect(lambda: self._select_edge("start"))
         self.btn_edge_end.clicked.connect(lambda: self._select_edge("end"))
@@ -1558,7 +1631,7 @@ class MainWindow(SummaryTab, QWidget):
                 self._refresh_clips()
         self._load_media(chosen)
 
-    def on_analyze(self, with_stt: bool) -> None:
+    def on_analyze(self, with_stt: bool, then=None) -> None:
         url = self.url_edit.text().strip() or (self.marker.url if self.marker else "")
         local = self.media_path if (self.media_path and self.media_path.exists()) else None
         if not url and not local:
@@ -1662,12 +1735,60 @@ class MainWindow(SummaryTab, QWidget):
             print("구간 저장 완료")
             return marker, transcript
 
-        self._run(job, lambda r: self._apply_marker(*r),
+        def done(r):
+            self._apply_marker(*r)
+            if then:
+                QTimer.singleShot(0, then)      # 이어서 할 일 (예: 3분 요약 고르기)
+
+        self._run(job, done,
                   title="② 자동으로 찾기",
                   detail=("자막까지 만듭니다 — 20~40분 더 걸립니다" if with_stt
                           else "목사님 목소리를 대조해 설교와 축도를 찾습니다 (1~2분)"),
                   done_message="설교 구간을 찾았습니다",
                   next_step="시각을 확인하고 [3. 설교 영상 만들기]")
+
+    def transcribe_current(self, then=None) -> None:
+        """지금 정해 둔 구간 그대로 자막만 만든다. 구간은 건드리지 않는다.
+
+        [자동으로 찾기] 는 구간을 처음부터 다시 찾으므로, 손으로 다듬어 둔 구간이
+        있을 때 자막만 필요하면 이쪽을 쓴다. [3분 요약] 이 자막 없이 불렸을 때 쓴다.
+        """
+        if not self.marker or not self.marker.ranges():
+            return
+        marker = self.marker
+        local = self.media_path if (self.media_path and self.media_path.exists()) else None
+        url = marker.url or ""
+        cfg = self._config()
+        cfg.whisper_model = "medium"
+        total = sum(e - s for s, e, _ in marker.ranges())
+
+        def job():
+            wav = cfg.audio_path(marker.video_id)
+            if not wav.exists():
+                print("자막용 오디오 준비 중")
+                if local is not None:
+                    from core.voiceprint import to_wav
+                    to_wav(local, wav)
+                elif url.startswith("http"):
+                    fetch.download_audio(url, wav)
+                else:
+                    raise ToolError("자막을 만들 오디오가 없습니다.\n"
+                                    "[내 컴퓨터에서 열기] 로 영상을 다시 열어 주세요.")
+            transcript: list[dict] = []
+            for start, end, label in marker.ranges():
+                print(f"  {label}: {hms(start)} ~ {hms(end)}")
+                transcript.extend(transcribe.transcribe_range(wav, start, end, cfg, label))
+            transcribe.save_transcript(cfg.transcript_path(marker.video_id), transcript)
+            return transcript
+
+        def done(transcript):
+            self._apply_marker(marker, transcript)
+            if then:
+                QTimer.singleShot(0, then)
+
+        self._run(job, done, title="자막 만들기",
+                  detail=f"정해 둔 구간 {total / 60:.0f}분의 자막을 만듭니다 — CPU 에서 20~40분",
+                  done_message="자막을 만들었습니다")
 
     def on_load(self) -> None:
         cfg = self._config()
@@ -2114,7 +2235,13 @@ def main() -> int:
     app = QApplication(sys.argv)
     apply_light_theme(app)
     win = MainWindow()
-    win.show()
+    if win._small_screen:
+        # 노트북처럼 세로가 좁으면 처음부터 최대화한다. Windows 가 작업 표시줄과
+        # 제목 표시줄을 빼고 딱 맞춰 주므로 아래가 가려질 일이 없다.
+        win.showMaximized()
+    else:
+        win.show()
+        QTimer.singleShot(0, win._keep_on_screen)
     return app.exec()
 
 

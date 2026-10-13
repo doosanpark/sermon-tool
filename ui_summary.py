@@ -20,8 +20,8 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QUrl as _QUrl
 from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (
-    QComboBox, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMessageBox,
-    QProgressBar, QPushButton, QVBoxLayout, QWidget,
+    QComboBox, QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMessageBox,
+    QProgressBar, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
 from core import embed as embed_mod
@@ -75,6 +75,7 @@ class SummaryTab:
         self.sum_list.itemClicked.connect(
             lambda it: self._seek(float(it.data(Qt.UserRole))))
         self.sum_list.itemDoubleClicked.connect(self._on_summary_play)
+        self.sum_list.setMinimumHeight(90)       # 문장 서너 줄은 늘 보이게
         lay.addWidget(self.sum_list, 1)
 
         how = QHBoxLayout()
@@ -112,13 +113,21 @@ class SummaryTab:
         self.btn_sum_mp3.clicked.connect(self.on_summary_mp3)
         for b in (self.btn_sum_pick, self.btn_sum_undo,
                   self.btn_sum_make, self.btn_sum_mp3):
+            b.setMinimumHeight(30)               # 좁은 화면에서도 글자가 잘리지 않게
             row.addWidget(b)
         row.addStretch(1)
         self.sum_hint = QLabel("")
         self.sum_hint.setStyleSheet("color:#666; font-size:11px;")
         row.addWidget(self.sum_hint)
         lay.addLayout(row)
-        return box
+
+        # 그래도 칸이 모자라면 잘라 먹지 말고 스크롤로 보여 준다 (노트북 화면).
+        scroll = QScrollArea()
+        scroll.setWidget(box)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        return scroll
 
     # -------- 고르는 방법 --------
     def _pick_mode(self) -> str:
@@ -301,6 +310,44 @@ class SummaryTab:
         self._save_summary_picks()
         self._fill_summary_list()
 
+    def _prepare_for_summary(self, has_range: bool) -> None:
+        """요약에 필요한 사전 작업(설교 구간 · 자막)이 없으면 물어보고 대신 해 준다.
+
+        끝나면 [요약 골라줘] 를 이어서 부른다. 자막 만들기는 CPU 에서 20~40분이라
+        말없이 시작하지 않고 한 번 묻는다.
+        """
+        if hasattr(self, "stt_check") and not self.stt_check.isEnabled():
+            QMessageBox.information(
+                self, "자막 기능이 없습니다",
+                "요약은 설교 자막을 읽어서 고르는데, 이 설치본에는 자막 엔진\n"
+                "(faster-whisper) 이 없습니다. run.bat 으로 다시 실행해 주세요.")
+            return
+        if has_range:
+            mins = sum(e - s for s, e, _ in self.marker.ranges()) / 60
+            text = ("요약은 설교 자막을 읽어서 고르는데, 아직 자막이 없습니다.\n\n"
+                    f"지금 정해 둔 구간({mins:.0f}분)의 자막을 만든 뒤\n"
+                    "이어서 요약을 고를까요? 구간은 그대로 둡니다.\n\n"
+                    "CPU 에서 20~40분쯤 걸립니다.")
+        else:
+            text = ("요약하려면 설교 구간과 자막이 먼저 있어야 합니다.\n\n"
+                    "지금 [자동으로 찾기] 로 설교 구간을 찾고 자막까지 만든 뒤\n"
+                    "이어서 요약을 고를까요?\n\n"
+                    "CPU 에서 20~40분쯤 걸립니다.")
+        ok = QMessageBox.question(self, "사전 작업이 필요합니다", text)
+        if ok != QMessageBox.Yes:
+            return
+
+        def then():
+            if self.transcript and self.marker and self.marker.sermon_range():
+                self.on_summary_pick()
+            else:
+                self.log("  자막이 만들어지지 않아 요약을 고르지 못했습니다. 진행 로그를 확인하세요.")
+
+        if has_range:
+            self.transcribe_current(then=then)
+        else:
+            self.on_analyze(with_stt=True, then=then)
+
     def on_summary_pick(self) -> None:
         """프로그램이 처음부터 다시 고른다. 쉼 찾기가 몇 초 걸려 딴 실로 돌린다."""
         if not self.marker:
@@ -308,16 +355,8 @@ class SummaryTab:
                                     "[영상 가져오기] 로 예배 영상을 먼저 여세요.")
             return
         rng = self.marker.sermon_range()
-        if not rng:
-            QMessageBox.information(
-                self, "설교 구간을 먼저 정하세요",
-                "[자동으로 찾기] 를 눌러 설교 구간을 먼저 정해 주세요.")
-            return
-        if not self.transcript:
-            QMessageBox.information(
-                self, "자막이 필요합니다",
-                "요약은 설교 자막을 읽어서 고릅니다.\n"
-                "[자동으로 찾기] 를 눌러 자막까지 만든 뒤 다시 눌러 주세요.")
+        if not rng or not self.transcript:
+            self._prepare_for_summary(has_range=bool(rng))
             return
         if self.sum_marks and any(m.chosen for m in self.sum_marks):
             ok = QMessageBox.question(

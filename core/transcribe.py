@@ -8,7 +8,10 @@ from __future__ import annotations
 import json
 import tempfile
 import time
+import wave
 from pathlib import Path
+
+import numpy as np
 
 from .config import Config
 from .util import ToolError, _mmss, require, run
@@ -40,6 +43,22 @@ def _slice_wav(wav_path: Path, start: float, end: float, out_path: Path) -> Path
     return out_path
 
 
+def _read_wav16k(path: Path):
+    """_slice_wav 가 만든 16kHz 모노 16비트 wav 를 float32 배열로 읽는다.
+
+    faster-whisper 에 파일 경로를 주면 PyAV(av)로 다시 디코딩하는데, 둘의 판이
+    어긋나면 깨진다. 실제로 faster-whisper 1.2.1 + av 19 조합에서
+    `open() got an unexpected keyword argument 'metadata_errors'` 로 자막 만들기가
+    통째로 죽었다. 이미 ffmpeg 로 원하는 형식을 만들어 두었으니 그대로 읽어 넘기면
+    av 를 아예 거치지 않는다. 배열을 받으면 faster-whisper 는 16kHz 로 간주한다.
+    """
+    with wave.open(str(path), "rb") as w:
+        if w.getframerate() != 16000 or w.getnchannels() != 1 or w.getsampwidth() != 2:
+            raise ToolError(f"자막용 오디오 형식이 예상과 다릅니다: {path}")
+        raw = w.readframes(w.getnframes())
+    return np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+
+
 def transcribe_range(wav_path: Path, start: float, end: float, cfg: Config,
                      label: str = "", progress: bool = True,
                      step: float = 3.0) -> list[dict]:
@@ -56,7 +75,7 @@ def transcribe_range(wav_path: Path, start: float, end: float, cfg: Config,
     with tempfile.TemporaryDirectory() as tmp:
         clip = _slice_wav(wav_path, start, end, Path(tmp) / "clip.wav")
         segments, _info = model.transcribe(
-            str(clip),
+            _read_wav16k(clip),
             language=cfg.language,
             beam_size=cfg.beam_size,
             vad_filter=True,

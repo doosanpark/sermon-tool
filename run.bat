@@ -6,7 +6,7 @@ rem ---- Use the project venv (.venv). Create it on first run with a final-relea
 rem ---- Messages are ASCII on purpose: cmd.exe reads .bat files in the OEM code page,   ----
 rem ---- so UTF-8 Korean here would show up garbled.                                       ----
 set "PY=.venv\Scripts\python.exe"
-if exist "%PY%" goto run
+if exist "%PY%" goto check
 
 echo .venv not found. Creating it (first time only, takes a few minutes)...
 set MADE=
@@ -23,12 +23,25 @@ if not exist "%PY%" (
   pause
   exit /b 1
 )
+:install
 "%PY%" -m pip install -q --upgrade pip
-"%PY%" -m pip install -q -r requirements.txt
+echo Installing packages from requirements.txt. Download is about 500MB, so this can take 5-10 minutes.
+echo Progress is shown below. Do not close this window.
+"%PY%" -m pip install -r requirements.txt
 if errorlevel 1 (
   echo Package install failed. Check the internet connection.
   pause
   exit /b 1
+)
+goto run
+
+:check
+rem ---- .venv may exist without the packages (e.g. made only for PyInstaller). ----
+rem ---- If any required package is missing, install requirements.txt now.      ----
+"%PY%" -c "import PySide6, numpy, sherpa_onnx, yt_dlp" >nul 2>&1
+if errorlevel 1 (
+  echo Some packages are missing in .venv. Installing them - first time only, takes a few minutes...
+  goto install
 )
 
 :run

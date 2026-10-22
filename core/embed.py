@@ -15,12 +15,13 @@
 """
 from __future__ import annotations
 
+import gc
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 
-from .util import PROJECT_ROOT, ToolError
+from .util import PROJECT_ROOT, ToolError, model_search_dirs
 
 # Transformers.js 용으로 ONNX 로 내보내 둔 다국어 임베딩. 한국어가 들어 있고
 # 양자화본이 120MB 라 설치본 옆에 두기에 부담이 없다.
@@ -32,11 +33,22 @@ MAX_TOKENS = 192          # 설교 한 문장은 길어야 이 안에 들어온�
 PREFIX = "query: "
 
 
+def model_dirs(cfg) -> list[Path]:
+    """모델을 찾아볼 곳들. 맨 앞이 받아서 넣는 곳이다."""
+    dirs = [PROJECT_ROOT / "bin" / "models" / "text-embed"]
+    dirs += model_search_dirs(cfg.work_dir, "text-embed")
+    return dirs
+
+
 def model_dir(cfg) -> Path:
-    """내려받은 모델을 두는 곳. 설치본은 사용자 폴더에 쓴다."""
-    bundled = PROJECT_ROOT / "bin" / "models" / "text-embed"
-    if (bundled / "model.onnx").exists():
-        return bundled
+    """이 모델이 있는 곳. 아무 데도 없으면 받아서 넣을 자리.
+
+    소스 폴더에 넣어 둔 모델도 찾는다. 빌드본의 작업 폴더는 사용자 폴더라서,
+    한 곳만 보면 모델이 PC 안에 있는데도 "아직 없음" 이 떴다 (2026-10-20).
+    """
+    for d in model_dirs(cfg):
+        if (d / "model.onnx").exists() and (d / "tokenizer.json").exists():
+            return d
     return Path(cfg.work_dir) / "models" / "text-embed"
 
 
@@ -187,3 +199,15 @@ def importance(vecs: np.ndarray, drop_top: int = 1) -> np.ndarray:
     np.fill_diagonal(sim, 0.0)
     return np.clip(sim, 0.0, None).mean(axis=1).astype(np.float32)
 
+
+def release_model() -> None:
+    """올려 둔 문장 임베딩 모델을 내려놓는다.
+
+    onnxruntime 세션 하나가 300MB 안팎을 잡고 있다. 요약이 끝나면 다음
+    요약까지 쓸 일이 없으니 놓아 준다. 다시 필요하면 저절로 다시 올라온다.
+    """
+    cache = SentenceEmbedder._cache
+    if not cache:
+        return
+    cache.clear()
+    gc.collect()

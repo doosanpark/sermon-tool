@@ -96,6 +96,9 @@ def main() -> int:
 
     check_summary()
     check_stages()
+    check_fixwords()
+    check_blocks()
+    check_training_match()
 
     print("\n전체 통과")
     return 0
@@ -241,6 +244,116 @@ def check_summary() -> None:
     got = m.summary_chosen([x.start for x in marks])
     assert got == [x.chosen for x in marks], "저장·복원이 어긋난다"
     print("요약 저장 OK  clips 와 섞이지 않고, 저장한 대로 되살아남")
+
+
+def check_fixwords() -> None:
+    """자막 오인식 사전. 실제로 틀렸던 말을 고치고, 맞는 말은 건드리지 않고, 두 번 돌려도 같아야 한다."""
+    from core.fixwords import fix_text
+    cases = {
+        "니에미아가 분노했습니다": "느헤미야가 분노했습니다",
+        "뉘미안을 보면": "느헤미야를 보면",
+        "하나님을 경유하면서 살지 않을 겁니까?": "하나님을 경외하면서 살지 않을 겁니까?",
+        "가난인의 사랑과 성경의 교통하심": "하나님의 사랑과 성령의 교통하심",
+        "사랑하는 창의직교의 성도 여러분": "사랑하는 창의진교회의 성도 여러분",
+        "산발라스는 경계하면서": "산발랏은 경계하면서",
+        "요안복음 3장 16절": "요한복음 3장 16절",
+    }
+    for wrong, right in cases.items():
+        got = fix_text(wrong)
+        assert got == right, (wrong, got)
+        assert fix_text(got) == got, got                    # 두 번 돌려도 같다
+    for keep in ("경의를 표합니다", "경유지를 거쳐 갑니다", "이미 아는 이야기입니다"):
+        assert fix_text(keep) == keep, keep                  # 맞는 말은 그대로
+    print(f"자막 사전 OK  오인식 {len(cases)}종 고침 · 맞는 말 그대로 · 다시 돌려도 같음")
+
+
+def check_blocks() -> None:
+    """덩어리 · 역할 · 형식. AI 가 엉뚱하게 답해도 칸이 비지 않고 봉독은 들어가지 않아야 한다."""
+    from core import blocks as blk
+    from core import highlight as hl
+
+    transcript = fake_sermon()
+    lo, hi = transcript[0]["start"], transcript[-1]["end"]
+    marks = hl.build_marks(transcript, lo, hi)
+    hl.score_marks(marks, hl.keywords(marks))
+    blk.mark_exits(marks)
+    blocks = blk.segment(marks, [])
+    blk.label_rules(blocks, marks)
+    assert len(blocks) >= 4, len(blocks)
+    for b in blocks:
+        assert 0 < b.duration <= 70, (b.index, b.duration)
+
+    def check(slots, fmt):
+        assert slots and all(s.chosen for s in slots), fmt
+        chosen = [s.chosen for s in slots]
+        for i, a in enumerate(chosen):
+            for b in chosen[i + 1:]:
+                assert not a.overlaps(b), (fmt, a, b)          # 칸끼리 겹치지 않는다
+        blk.apply_slots(slots, blocks, marks)
+        assert not any(m.chosen and m.kind == "reading" for m in marks), fmt   # 봉독은 안 넣는다
+        return len(slots)
+
+    n2 = check(blk.assemble("two", blocks, 100), "two")
+    assert n2 == 2, n2
+    n3 = check(blk.assemble("three", blocks, 180), "three")
+    n1 = check(blk.assemble("one", blocks, 180), "one")
+    assert (n3, n1) == (3, 1), (n3, n1)
+
+    # AI 가 전부 '핵심' 이라고 우겨도 문제 제기 · 적용 칸이 사라지지 않는다
+    def bad_ai(system, user, max_tokens):
+        import re
+        nums = [int(x) for x in re.findall(r"^\[(\d+)\]", user, re.M)]
+        return '{"덩어리": [' + ",".join(f'{{"번호": {n}, "역할": "핵심"}}' for n in nums) + "]}"
+    reading_before = {b.index for b in blocks if b.role == "reading"}
+    blk.label_with_ai(blocks, bad_ai)
+    assert {b.index for b in blocks if b.role == "reading"} == reading_before   # 봉독은 AI 가 못 바꾼다
+    check(blk.assemble("three", blocks, 180), "three-after-bad-ai")
+
+    def dead_ai(system, user, max_tokens):
+        raise TimeoutError("timed out")
+    blk.label_with_ai(blocks, dead_ai)                       # 죽어도 예외 없이 지나간다
+    print(f"덩어리 OK  {blk.describe(blocks)} · 세 덩어리/한 대목 칸 채움 · AI 가 엉뚱해도 칸 유지")
+
+
+def check_training_match() -> None:
+    """학습한 AI 가 받는 글 = 학습 때 본 글. 그리고 학습한 모델이 있으면 그걸 쓴다.
+
+    tools/train_data.py 는 section_prompt / whole_prompt 로 학습 문제를 만든다. 설교 편집기
+    (label_with_ai) 가 묻는 글이 그것과 한 글자라도 다르면 학습한 보람이 줄어든다.
+    """
+    import tempfile
+    from pathlib import Path
+    from core import blocks as blk, highlight as hl, llm as llm_mod
+    from core.config import Config
+
+    transcript = fake_sermon()
+    lo, hi = transcript[0]["start"], transcript[-1]["end"]
+    marks = hl.build_marks(transcript, lo, hi)
+    hl.score_marks(marks, hl.keywords(marks))
+    blocks = blk.segment(marks, [])
+    blk.label_rules(blocks, marks)
+    secs = blk.sections(blocks)
+    asked: list[str] = []
+
+    def record(system, user, max_tokens):
+        asked.append(user)
+        return '{"요약": "시험 요약"}'
+    blk.label_with_ai(blocks, record)
+    want = [blk.section_prompt(secs, k)[0] for k in range(len(secs))]
+    assert asked[:len(secs)] == want, "구획 묻는 글이 학습 자료와 다릅니다"
+    if len(secs) >= 2:
+        assert asked[len(secs)] == blk.whole_prompt(["시험 요약"] * len(secs)), "전체 묻는 글이 다릅니다"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = Config()
+        cfg.work_dir = Path(tmp)
+        base = llm_mod.model_dir(cfg) / cfg.llm_model_file
+        assert llm_mod.model_path(cfg) == base and not llm_mod.is_tuned(cfg)
+        tuned = llm_mod.tuned_path(cfg)
+        tuned.parent.mkdir(parents=True)
+        tuned.write_bytes(b"gguf")
+        assert llm_mod.model_path(cfg) == tuned and llm_mod.is_tuned(cfg)
+    print(f"학습 맞춤 OK  묻는 글 {len(asked)}개가 학습 자료와 같음 · 학습한 모델이 있으면 그걸 씀")
 
 
 if __name__ == "__main__":

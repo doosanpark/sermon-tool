@@ -70,6 +70,10 @@ def to_wav(media: Path, out_wav: Path, start: float | None = None,
 
 
 def read_wav(path: Path) -> np.ndarray:
+    """wav 를 통째로 메모리에 올린다. 짧은 파일에만 쓴다.
+
+    긴 예배 영상에는 WavFrames 를 쓴다 — 아래 설명 참고.
+    """
     with wave.open(str(path), "rb") as wf:
         if wf.getsampwidth() != 2:
             raise ToolError("16bit PCM wav 만 지원합니다.")
@@ -79,6 +83,62 @@ def read_wav(path: Path) -> np.ndarray:
     if channels > 1:
         audio = audio.reshape(-1, channels).mean(axis=1)
     return audio
+
+
+class WavFrames:
+    """wav 를 통째로 올리지 않고, 쓸 조각만 그때그때 읽어 온다.
+
+    왜 필요한가 (2026-10-20, 교회 PC):
+        82분 예배는 16kHz 로 7,850만 개 값이다. float32 로 바꾸면 300MB 이고,
+        바꾸기 전 16비트 원본 157MB 가 함께 떠 있어 한순간 460MB 가 필요하다.
+        메모리가 넉넉하지 않은 PC 에서는 바로 여기서 멈춘다:
+            numpy ... Unable to allocate 300. MiB for an array with shape (78544208,)
+        설교를 찾는 일 자체는 3초짜리 창을 하나씩 보는 것이라, 애초에 전부
+        올려 둘 이유가 없었다.
+
+    어떻게:
+        _windows() 가 쓰는 것은 len(audio) 와 audio[i:j] 둘뿐이다. 그 둘만
+        흉내내고 속으로는 그 자리만 파일에서 읽는다. 한 조각은 3초 = 약 190KB 라
+        아무리 긴 영상이라도 쓰는 메모리가 늘지 않는다.
+
+    쓰는 법 (반드시 with 로 — Windows 는 파일이 열려 있으면 임시 폴더를 못 지운다):
+        with WavFrames(wav) as audio:
+            times, scores = scan(audio, vp, embedder)
+    """
+
+    def __init__(self, path: Path):
+        self._wf = wave.open(str(path), "rb")
+        if self._wf.getsampwidth() != 2:
+            self._wf.close()
+            raise ToolError("16bit PCM wav 만 지원합니다.")
+        self._channels = self._wf.getnchannels()
+        self._frames = self._wf.getnframes()
+
+    def __len__(self) -> int:
+        return self._frames
+
+    def __getitem__(self, cut) -> np.ndarray:
+        if not isinstance(cut, slice):
+            raise TypeError("WavFrames 는 audio[i:j] 꼴로만 읽습니다")
+        start, stop, _ = cut.indices(self._frames)
+        count = max(stop - start, 0)
+        if count == 0:
+            return np.zeros(0, dtype=np.float32)
+        self._wf.setpos(start)
+        raw = np.frombuffer(self._wf.readframes(count), dtype="<i2")
+        audio = raw.astype(np.float32) / 32768.0
+        if self._channels > 1:
+            audio = audio.reshape(-1, self._channels).mean(axis=1)
+        return audio
+
+    def close(self) -> None:
+        self._wf.close()
+
+    def __enter__(self) -> "WavFrames":
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self.close()
 
 
 # ------------------------------------------------------------------ 임베딩
@@ -151,15 +211,15 @@ def enroll(sermon_wavs: list[Path], embedder: Embedder, window: float = 3.0,
     vectors: list[np.ndarray] = []
     sources: list[str] = []
     for path in sermon_wavs:
-        audio = read_wav(Path(path))
         taken = 0
-        for _, chunk, voiced in _windows(audio, window, hop, min_rms):
-            if not voiced:
-                continue
-            vectors.append(embedder.embed(chunk))
-            taken += 1
-            if taken >= max_per_file:
-                break
+        with WavFrames(Path(path)) as audio:       # 여기도 조각만 읽는다
+            for _, chunk, voiced in _windows(audio, window, hop, min_rms):
+                if not voiced:
+                    continue
+                vectors.append(embedder.embed(chunk))
+                taken += 1
+                if taken >= max_per_file:
+                    break
         sources.append(Path(path).stem)
         progress(f"  {Path(path).stem}: 표본 {taken}개")
 
@@ -331,8 +391,9 @@ def analyze_media(media: Path, vp: Voiceprint, embedder: Embedder, *,
         else:
             progress("  오디오 추출 중")
             to_wav(Path(media), wav)
-        audio = read_wav(wav)
-        minutes = len(audio) / SAMPLE_RATE / 60
-        progress(f"  {minutes:.0f}분 훑는 중 (성문 대조)")
-        times, scores = scan(audio, vp, embedder, hop=hop, progress=progress)
+        # 통째로 올리지 않고 쓸 조각만 읽는다 — 메모리가 적은 PC 에서 멈추지 않게.
+        with WavFrames(wav) as audio:
+            minutes = len(audio) / SAMPLE_RATE / 60
+            progress(f"  {minutes:.0f}분 훑는 중 (성문 대조)")
+            times, scores = scan(audio, vp, embedder, hop=hop, progress=progress)
     return find_service(times, scores, **kwargs)

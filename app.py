@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import gc
 import io
 import re
 import sys
+import textwrap
 import time
 import traceback
 from pathlib import Path
@@ -29,7 +31,12 @@ from PySide6.QtWidgets import (
 )
 
 from core import export as export_mod
-from core import fetch, highlight as hl_mod, pauses as pause_mod, transcribe
+from core import blocks as blocks_mod
+from core import fetch, fixwords, highlight as hl_mod, pauses as pause_mod, transcribe
+import theme as theme_mod
+import ui_header
+from core import machine as machine_mod
+from core import version as version_mod
 from core.config import Config
 from core.detect import apply_service_result, detect, format_detection
 from core.diarize import diarize
@@ -91,6 +98,19 @@ class Worker(QThread):
 
 
 # ----------------------------------------------------------------- 타임라인
+# 지금 쓰는 화면 색. apply_theme() 이 갈아 끼우고, 직접 그리는 위젯들이 여기서 읽는다.
+# 전역 하나로 두는 이유: RangeBar·ZoomBar 는 MainWindow 보다 먼저 만들어질 수 있고,
+# 위젯마다 테마를 들고 다니면 테마를 바꿀 때 한 곳이라도 빠지면 화면이 반쪽만 바뀐다.
+T = theme_mod.tokens("dark")
+
+
+def _c(hexcolor: str, alpha: int = 255) -> QColor:
+    c = QColor(hexcolor)
+    if alpha != 255:
+        c.setAlpha(alpha)
+    return c
+
+
 class RangeBar(QWidget):
     """전체 길이 위에 구간과 재생 위치를 그린다. 선택된 구간은 진하게."""
 
@@ -126,27 +146,29 @@ class RangeBar(QWidget):
 
     def paintEvent(self, event):  # noqa: N802
         p = QPainter(self)
-        p.fillRect(self.rect(), QColor(235, 236, 240))
+        p.fillRect(self.rect(), _c(T.tl_bg))
 
-        # 10분 눈금
+        # 눈금 — 2분마다 짧게, 10분마다 길게 (FilmCraft 눈금자처럼 두 단으로).
+        # 한 가지 길이로만 그리면 80분 영상에서 어디가 어디인지 가늠이 안 된다.
         if self.duration > 0:
-            p.setPen(QPen(QColor(205, 207, 212), 1))
-            step = 600
-            t = step
-            while t < self.duration:
-                x = int(self._x(t))
-                p.drawLine(x, self.height() - 10, x, self.height())
-                t += step
+            for step, tick, alpha in ((120, 5, 150), (600, 10, 255)):
+                p.setPen(QPen(_c(T.tl_ruler_tick, alpha), 1))
+                t = step
+                while t < self.duration:
+                    x = int(self._x(t))
+                    p.drawLine(x, self.height() - tick, x, self.height())
+                    t += step
 
         for i, (start, end, label) in enumerate(self.ranges):
             x0, x1 = self._x(start), self._x(end)
-            base = QColor(64, 132, 220) if label != "benediction" else QColor(72, 176, 120)
+            base = _c(T.sermon_clip if label != "benediction" else T.bene_clip)
             if i != self.selected and self.selected >= 0:
-                base = base.lighter(155)
+                # 고르지 않은 구간은 흐리게. 어두운 화면에서는 밝히면 더 튀므로 어둡게 한다.
+                base = base.darker(165) if T.dark else base.lighter(155)
             p.fillRect(int(x0), 6, max(int(x1 - x0), 3), self.height() - 20, base)
 
             if x1 - x0 > 42:
-                p.setPen(QColor(255, 255, 255))
+                p.setPen(_c(T.clip_text))
                 f = QFont()
                 f.setPointSize(8)
                 p.setFont(f)
@@ -157,14 +179,17 @@ class RangeBar(QWidget):
             s, e, _ = self.ranges[self.selected]
             for tsec, mark in ((s, "["), (e, "]")):
                 x = int(self._x(tsec))
-                p.setPen(QPen(QColor(20, 60, 140), 2))
+                p.setPen(QPen(_c(T.clip_selected_border), 2))
                 p.drawLine(x, 2, x, self.height() - 12)
-                p.fillRect(x - 3, 2, 6, 8, QColor(20, 60, 140))
+                p.fillRect(x - 3, 2, 6, 8, _c(T.clip_selected_border))
 
         if self.duration > 0:
-            p.setPen(QPen(QColor(215, 45, 45), 2))
+            # 재생 머리 — FilmCraft 와 같은 파란 선에, 위쪽에 작은 머리를 붙인다.
+            # 선만 있으면 구간 색과 겹쳐 어디가 지금인지 눈에 안 들어온다.
             x = int(self._x(self.position))
+            p.setPen(QPen(_c(T.playhead), 2))
             p.drawLine(x, 0, x, self.height())
+            p.fillRect(x - 5, 0, 10, 5, _c(T.playhead))
 
     # --- 경계 드래그 -------------------------------------------------
     MIN_DRAG_PX = 24
@@ -279,11 +304,11 @@ class ZoomBar(QWidget):
     def paintEvent(self, event):  # noqa: N802
         p = QPainter(self)
         w, h = self.width(), self.height()
-        p.fillRect(self.rect(), QColor(246, 247, 250))
+        p.fillRect(self.rect(), _c(T.control_well))
 
         # 구간 안쪽을 칠해 어디가 남는지 보여준다
         ex = int(self._x(self.edge_time))
-        keep = QColor(64, 132, 220, 55)
+        keep = _c(T.sermon_clip, 90 if T.dark else 55)
         if self.inside_left:
             p.fillRect(0, 0, max(ex, 0), h - 16, keep)
         else:
@@ -298,32 +323,32 @@ class ZoomBar(QWidget):
             x = int(self._x(tick))
             if 0 <= x <= w:
                 major = tick % 5 == 0
-                p.setPen(QPen(QColor(180, 183, 190), 1))
+                p.setPen(QPen(_c(T.tl_ruler_tick), 1))
                 p.drawLine(x, h - 16, x, h - (4 if major else 10))
                 if major:
-                    p.setPen(QColor(110, 113, 120))
+                    p.setPen(_c(T.tl_ruler_text))
                     p.drawText(x + 2, h - 4, fmt(max(tick, 0)))
             tick += 1
 
         px = int(self._x(self.position))
         if 0 <= px <= w:
-            p.setPen(QPen(QColor(215, 45, 45), 1, Qt.DashLine))
+            p.setPen(QPen(_c(T.playhead), 1, Qt.DashLine))
             p.drawLine(px, 0, px, h - 16)
 
         # 반대쪽 경계도 창 안에 있으면 흐리게 그린다
         other_t = self.clip_end if self.which == "start" else self.clip_start
         other_x = int(self._x(other_t))
         if 0 <= other_x <= w:
-            p.setPen(QPen(QColor(120, 150, 200), 2, Qt.DotLine))
+            p.setPen(QPen(_c(T.text_faint), 2, Qt.DotLine))
             p.drawLine(other_x, 0, other_x, h - 16)
-            p.setPen(QColor(110, 140, 190))
+            p.setPen(_c(T.text_faint))
             p.drawText(other_x + 4, 26, "끝" if self.which == "start" else "시작")
 
         # 조정 중인 경계 — 잡기 쉽게 크게 그린다
-        p.setPen(QPen(QColor(30, 90, 190), 3))
+        p.setPen(QPen(_c(T.accent), 3))
         p.drawLine(ex, 18, ex, h - 16)
-        p.fillRect(ex - 9, 18, 18, 16, QColor(30, 90, 190))
-        p.setPen(QColor(255, 255, 255))
+        p.fillRect(ex - 9, 18, 18, 16, _c(T.accent))
+        p.setPen(_c(T.text_on_accent))
         f2 = QFont(); f2.setPointSize(8); f2.setBold(True)
         p.setFont(f2)
         p.drawText(ex - 6, 31, "↔")
@@ -333,7 +358,7 @@ class ZoomBar(QWidget):
         length = max(self.clip_end - self.clip_start, 0.0)
         mark_s = "▶" if self.which == "start" else "  "
         mark_e = "▶" if self.which == "end" else "  "
-        p.setPen(QColor(60, 63, 70))
+        p.setPen(_c(T.text))
         p.drawText(6, 14, f"{mark_s}시작 {fmt(self.clip_start)}    "
                           f"{mark_e}끝 {fmt(self.clip_end)}    "
                           f"길이 {length/60:.1f}분    (±{self.span/2:.0f}초 · 휠로 확대)")
@@ -383,11 +408,13 @@ class MainWindow(SummaryTab, QWidget):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("창의진교회 설교영상 편집기")
+        self.setWindowTitle(f"창의진교회 설교영상 편집기 {version_mod.short()}")
         self._fit_to_screen()
 
         self.cfg = Config()
         self.cfg.ensure_dirs()
+        self._log_path = self._open_run_log()
+        fixwords.ensure_user_file(self.cfg.work_dir)   # 자막 오인식 사전 (고칠말.txt)
         self.marker: Marker | None = None
         self.transcript: list[dict] = []
         self.worker: Worker | None = None
@@ -405,12 +432,17 @@ class MainWindow(SummaryTab, QWidget):
         self.sum_outline = hl_mod.Outline()
         self.sum_pauses: list = []
         self.sum_undo: list[list[bool]] = []
+        self.sum_blocks: list = []          # 덩어리 (core/blocks.py)
+        self.sum_slots: list = []           # 형식의 칸과 칸마다 후보
+        self.sum_initial: list[bool] = []   # 프로그램이 처음 고른 것 — 학습 자료에 남긴다
+        self.sum_theme = ""                 # AI 가 본 설교 주제 한 문장
 
         self._build_ui()
         self._compact_for_small_screen()
         self._build_shortcuts()
         self._set_busy(False)
         self._load_prefs()
+        self._refresh_header_theme()
         self._startup_check()
         self._update_hint()
 
@@ -433,7 +465,8 @@ class MainWindow(SummaryTab, QWidget):
         for edit in (self.start_edit, self.end_edit):
             edit.setFixedHeight(26)
             edit.setStyleSheet(
-                "font-size:14px; font-weight:bold; background:#ffffff; color:#1c1e21;")
+                f"font-size:{T.font_big_pt}pt; font-weight:bold;"
+                f"background:{T.field_bg}; color:{T.timecode};")
         for b in (self.btn_start_here, self.btn_end_here):
             b.setFixedHeight(26)
         for b in (self.btn_start_check, self.btn_end_check):
@@ -487,13 +520,42 @@ class MainWindow(SummaryTab, QWidget):
             self.move(frame.left(), top)
 
     # ============================================================== UI
+    # 머리띠의 모드 탭 — **사용자가 작업하는 것** 두 가지다.
+    #
+    # '만들기' 를 모드로 두었다가 뺐다 (2026-10-20). 이 프로그램에 만드는 화면은
+    # 따로 없다 — 만들기 단추는 하던 일 옆에 있다. 구간을 정했으면 거기서
+    # [설교 영상 만들기], 요약을 골랐으면 거기서 [요약 영상 만들기] 를 누른다.
+    # 별도 모드로 두니 하는 일이 '로그 띄우기' 뿐이라 용도가 없었다.
+    #
+    # 진행 로그도 모드가 아니라 가끔 들여다보는 것이라 머리띠의 [기록] 단추로 옮겼다.
+    MODES = ("설교 찾기", "요약")
+    TAB_LOG = 2
+
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setSpacing(8)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        root.addWidget(self._build_toolbar())
+        # 맨 위 머리띠 (FilmCraft 짜임새). 창 끝까지 닿아야 하므로 바깥 여백을 0 으로
+        # 두고, 나머지 내용은 안쪽 칸에 넣어 여백을 준다.
+        self.header = ui_header.HeaderBar(
+            f"창의진교회 설교영상 편집기  {version_mod.short()}", list(self.MODES))
+        self.header.mode_clicked.connect(self._on_mode_clicked)
+        self.header.fullscreen_clicked.connect(self._toggle_fullscreen)
+        self.header.log_clicked.connect(self._on_log_clicked)
+        root.addWidget(self.header)
 
-        editor_scroll = QScrollArea()
+        inner = QWidget()
+        lay = QVBoxLayout(inner)
+        lay.setContentsMargins(8, 8, 8, 6)
+        lay.setSpacing(8)
+        root.addWidget(inner, 1)
+
+        self.toolbar_box = self._build_toolbar()
+        lay.addWidget(self.toolbar_box)
+
+        # [만들기] 모드에서 만들기 단추까지 내려 주려면 나중에도 잡을 수 있어야 한다
+        editor_scroll = self.editor_scroll = QScrollArea()
         editor_scroll.setWidget(self._build_editor())
         editor_scroll.setWidgetResizable(True)
         editor_scroll.setFrameShape(QFrame.NoFrame)
@@ -510,9 +572,12 @@ class MainWindow(SummaryTab, QWidget):
         player_scroll.setFrameShape(QFrame.NoFrame)
         player_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
+        # 패널로 감싼다 — 영상 칸에는 제목 띠를, 편집 칸에는 테두리만.
+        # 편집 칸은 안에 [2. 설교 구간 정하기] 라는 제목이 이미 있어 띠를 또 올리면
+        # 같은 말이 두 번 적힌다. 지금 만지고 있는 칸에는 파란 테두리가 생긴다.
         middle = QSplitter(Qt.Horizontal)
-        middle.addWidget(player_scroll)
-        middle.addWidget(editor_scroll)
+        middle.addWidget(ui_header.Panel("영상", player_scroll))
+        middle.addWidget(ui_header.Panel(None, editor_scroll))
         middle.setSizes([880, 420])
 
         self.tabs = QTabWidget()
@@ -524,33 +589,38 @@ class MainWindow(SummaryTab, QWidget):
             "한 번 클릭: 그 시각으로 이동해서 들어보기\n"
             "두 번 클릭: 받아쓰기가 틀린 글자를 그 자리에서 고치기\n"
             "고친 내용은 .srt 와 영상에 넣는 자막에 그대로 들어갑니다.")
-        self.tabs.addTab(self.subtitle_list, "자막 (클릭: 이동 · 두 번 클릭: 고치기)")
+        self.tabs.addTab(self.subtitle_list, "자막 고치기")
         self.summary_tab = self._build_summary_tab()
-        self.tabs.addTab(self.summary_tab, "3분 요약")
+        self.tabs.addTab(self.summary_tab, "요약")
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(5000)
         self.log_view.setStyleSheet(
-            "font-family:Consolas,'D2Coding',monospace; font-size:11px;"
-            "background:#ffffff; color:#1c1e21;")
-        self.tabs.addTab(self.log_view, "진행 로그")
+            "font-family:Consolas,'D2Coding',monospace;"
+            f"font-size:{T.font_mono_pt}pt;"
+            f"background:{T.field_bg}; color:{T.text};")
+        self.tabs.addTab(self._build_log_tab(), "진행 로그")
         self.tabs.setMinimumHeight(130)
 
         # 위(영상·편집)와 아래(탭)를 끌어서 나눌 수 있게 한다. 노트북처럼 세로가 좁으면
         # 고정 비율로는 [3분 요약] 탭의 목록과 버튼이 잘린다 (1366x768 에서 목록 한 줄).
         self.vsplit = QSplitter(Qt.Vertical)
         self.vsplit.addWidget(middle)
-        self.vsplit.addWidget(self.tabs)
+        # 아래 칸 — 탭 줄은 숨긴다. 머리띠의 모드 탭이 같은 것을 가리켜 탭이 두 줄로
+        # 겹쳐 보였다 (2026-10-20). 지금 무엇을 보고 있는지는 패널 제목 띠에 적는다.
+        self.tabs.tabBar().hide()
+        self.bottom_panel = ui_header.Panel(self.tabs.tabText(0), self.tabs)
+        self.vsplit.addWidget(self.bottom_panel)
         self.vsplit.setChildrenCollapsible(False)
         self.vsplit.setStretchFactor(0, 5)
         self.vsplit.setStretchFactor(1, 2)
-        root.addWidget(self.vsplit, 1)
+        lay.addWidget(self.vsplit, 1)
         self._split_before_summary: list[int] | None = None
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
         self.hint = QLabel()
-        self.hint.setStyleSheet("color:#555; padding:2px;")
-        root.addWidget(self.hint)
+        self.hint.setStyleSheet(f"color:{T.text_dim}; padding:2px;")
+        lay.addWidget(self.hint)
 
         # 미디어
         self.player = QMediaPlayer(self)
@@ -570,6 +640,10 @@ class MainWindow(SummaryTab, QWidget):
         요약은 문장 목록을 읽으며 고르는 일이라 아래 칸이 넓어야 한다. 그 동안은
         구간 경계를 만지지 않으므로 정밀 조정 줄을 접고 영상 칸을 줄여 높이를 낸다.
         """
+        if hasattr(self, "header"):
+            # 진행 로그를 보는 중이면 어느 모드도 고르지 않은 상태로 둔다 (-1).
+            self.header.set_mode(_index if _index < len(self.MODES) else -1)
+            self.bottom_panel.set_title(self.tabs.tabText(_index))
         if not hasattr(self, "vsplit"):
             return
         on_summary = self.tabs.currentWidget() is self.summary_tab
@@ -578,7 +652,7 @@ class MainWindow(SummaryTab, QWidget):
             self.fine_box.setVisible(False)
             self.video.setMinimumHeight(90)
             total = sum(self.vsplit.sizes())
-            want = min(max(320, int(total * 0.5)), total - 200)
+            want = min(max(360, int(total * 0.5)), total - 120)
             if self.tabs.height() < want:
                 self.vsplit.setSizes([total - want, want])
         elif not on_summary and self._split_before_summary is not None:
@@ -587,6 +661,25 @@ class MainWindow(SummaryTab, QWidget):
             self.vsplit.setSizes(self._split_before_summary)
             self._split_before_summary = None
 
+    def _on_mode_clicked(self, index: int) -> None:
+        """머리띠의 모드 탭을 눌렀을 때 — 아래 칸의 내용을 바꾼다."""
+        if 0 <= index < self.tabs.count():
+            self.tabs.setCurrentIndex(index)
+
+    def _on_log_clicked(self) -> None:
+        """[기록] 단추 — 아래 칸에 진행 로그를 띄운다. 다시 누르면 하던 데로 돌아간다."""
+        if self.tabs.currentIndex() == self.TAB_LOG:
+            self.tabs.setCurrentIndex(max(self.header.current, 0))
+        else:
+            self.tabs.setCurrentIndex(self.TAB_LOG)
+
+    def _toggle_fullscreen(self) -> None:
+        """머리띠 오른쪽 꺾쇠 단추 — 전체 화면으로 갔다 돌아온다."""
+        if self.isFullScreen():
+            self.showNormal()
+        else:
+            self.showFullScreen()
+
     def _build_toolbar(self) -> QWidget:
         box = QGroupBox("1. 영상 준비")
         lay = QHBoxLayout(box)
@@ -594,7 +687,7 @@ class MainWindow(SummaryTab, QWidget):
         self.url_edit = QLineEdit()
         self.url_edit.setPlaceholderText("유튜브 주소를 여기에 붙여넣으세요")
         self.url_edit.setMinimumHeight(36)
-        self.url_edit.setStyleSheet("font-size:13px; padding:4px;")
+        self.url_edit.setStyleSheet(f"font-size:{T.font_big_pt}pt; padding:4px;")
         self.quality_box = QComboBox()
         self.quality_box.addItems(["원본", "720p", "360p"])
         self.btn_fetch = QPushButton("영상 가져오기")
@@ -605,7 +698,7 @@ class MainWindow(SummaryTab, QWidget):
         self.btn_load = QPushButton("이전 작업 불러오기")
         for b in (self.btn_fetch, self.btn_open):
             b.setMinimumHeight(38)
-            b.setStyleSheet("font-size:13px; font-weight:bold;")
+            b.setProperty("primary", True)
         for b in (self.btn_manual, self.btn_quick, self.btn_load):
             b.setMinimumHeight(34)
 
@@ -635,7 +728,7 @@ class MainWindow(SummaryTab, QWidget):
         self.btn_fetch.clicked.connect(self.on_fetch)
         self.btn_open.clicked.connect(self.on_open_file)
         self.btn_manual.clicked.connect(self.on_manual)
-        self.btn_quick.clicked.connect(lambda: self.on_analyze(with_stt=self.stt_check.isChecked()))
+        self.btn_quick.clicked.connect(self.on_quick)
         self.btn_load.setToolTip("저장해 둔 구간 정보를 되살립니다. 영상이 아니라 작업 내용입니다.")
         self.btn_load.clicked.connect(self.on_load)
         return box
@@ -647,7 +740,7 @@ class MainWindow(SummaryTab, QWidget):
 
         self.video = QVideoWidget()
         self.video.setMinimumHeight(180)
-        self.video.setStyleSheet("background:#111;")
+        self.video.setStyleSheet(f"background:{T.media_bg};")
         lay.addWidget(self.video, 1)
 
         nav = QHBoxLayout()
@@ -664,7 +757,8 @@ class MainWindow(SummaryTab, QWidget):
         self.btn_play = QPushButton("▶ 재생")
         self.btn_play.setMinimumWidth(120)
         self.btn_play.setMinimumHeight(38)
-        self.btn_play.setStyleSheet("font-size:14px; font-weight:bold;")
+        self.btn_play.setStyleSheet(
+            f"font-size:{T.font_big_pt}pt; font-weight:bold;")
         self.btn_play.setToolTip("단축키 Space 또는 K")
         nav.addWidget(self.btn_play)
 
@@ -692,8 +786,9 @@ class MainWindow(SummaryTab, QWidget):
 
         self.span_label = QLabel("구간 없음")
         self.span_label.setStyleSheet(
-            "font-size:15px; font-weight:bold; padding:6px; color:#1c1e21;"
-            "background:#eef3fb; border:1px solid #c6d6ee; border-radius:4px;")
+            f"font-size:{T.font_big_pt + 1}pt; font-weight:bold; padding:6px;"
+            f"color:{T.text}; background:{T.pill_active_bg};"
+            f"border:1px solid {T.control_border}; border-radius:{T.radius_sm}px;")
         lay.addWidget(self.span_label)
 
         edge_row = QHBoxLayout()
@@ -709,7 +804,7 @@ class MainWindow(SummaryTab, QWidget):
         edge_row.addStretch(1)
         self.zoom_hint = QLabel(
             "파란 ↔ 손잡이를 잡아 끌면 0.1초 단위 · 휠로 확대 · Ctrl+←/→ 로도 조정")
-        self.zoom_hint.setStyleSheet("color:#666;")
+        self.zoom_hint.setStyleSheet(f"color:{T.text_faint};")
         edge_row.addWidget(self.zoom_hint)
 
         # 정밀 조정 줄과 확대 막대는 한 묶음으로 둔다. [3분 요약] 탭을 볼 때는
@@ -742,7 +837,8 @@ class MainWindow(SummaryTab, QWidget):
 
         self.title_label = QLabel("영상 없음")
         self.title_label.setWordWrap(True)
-        self.title_label.setStyleSheet("font-weight:bold; font-size:11px;")
+        self.title_label.setStyleSheet(
+            f"font-weight:bold; font-size:{T.font_small_pt}pt;")
         self.title_label.setMaximumHeight(28)
         lay.addWidget(self.title_label)
 
@@ -763,8 +859,9 @@ class MainWindow(SummaryTab, QWidget):
             "끝나는 곳에서 [여기가 끝] 을 누르세요.")
         guide = self.guide
         guide.setStyleSheet(
-            "background:#fbf7e8; border:1px solid #e6dcb8; border-radius:4px;"
-            "padding:4px 6px; color:#5a4f2a; font-size:11px;")
+            f"background:{T.row_alt}; border:1px solid {T.separator};"
+            f"border-left:3px solid {T.warn}; border-radius:{T.radius_sm}px;"
+            f"padding:4px 6px; color:{T.text_dim}; font-size:{T.font_small_pt}pt;")
         guide.setMaximumHeight(42)
         lay.addWidget(guide)
 
@@ -772,7 +869,8 @@ class MainWindow(SummaryTab, QWidget):
         lay.addWidget(self._edge_group("end"))
 
         self.conf_label = QLabel("")
-        self.conf_label.setStyleSheet("color:#666; font-size:11px;")
+        self.conf_label.setStyleSheet(
+            f"color:{T.text_faint}; font-size:{T.font_small_pt}pt;")
         self.conf_label.setMaximumHeight(18)
         lay.addWidget(self.conf_label)
 
@@ -789,14 +887,14 @@ class MainWindow(SummaryTab, QWidget):
 
         self.btn_export = QPushButton("3.  설교 영상 만들기")
         self.btn_export.setFixedHeight(42)
-        self.btn_export.setStyleSheet(
-            "font-size:14px; font-weight:bold; background:#2f7d43; color:white;"
-            "border-radius:6px;")
+        self.btn_export.setProperty("primary", True)
+        self.btn_export.setStyleSheet(f"font-size:{T.font_big_pt}pt;")
         self.btn_mp3 = QPushButton("설교 mp3")
         self.btn_mp3.setFixedHeight(42)
         self.btn_mp3.setStyleSheet(
-            "font-size:13px; font-weight:bold; background:#ffffff; color:#2f7d43;"
-            "border:2px solid #2f7d43; border-radius:6px;")
+            f"font-size:{T.font_pt}pt; font-weight:600; background:transparent;"
+            f"color:{T.accent}; border:1px solid {T.accent};"
+            f"border-radius:{T.radius_sm}px;")
         self.btn_mp3.setToolTip(
             "설교를 소리만 mp3 로 뽑습니다. 영상은 만들지 않습니다.\n"
             "구간 목록에 있는 그대로 들어갑니다 (시작 영상은 넣지 않습니다).\n"
@@ -820,8 +918,7 @@ class MainWindow(SummaryTab, QWidget):
         self.btn_advanced = QPushButton("고급 설정 보기  ▼")
         self.btn_advanced.setCheckable(True)
         self.btn_advanced.setFixedHeight(22)
-        self.btn_advanced.setStyleSheet(
-            "color:#666; border:none; text-align:left; font-size:11px;")
+        self.btn_advanced.setProperty("flat", True)
         lay.addWidget(self.btn_advanced)
 
         self.advanced = QWidget()
@@ -840,6 +937,19 @@ class MainWindow(SummaryTab, QWidget):
             "소리를 키우기 전에 잡음을 먼저 지우므로 잡음까지 커지지 않습니다.")
         noise_row.addWidget(self.denoise_box, 1)
         adv.addLayout(noise_row)
+
+        self.voice_check = QCheckBox("말소리 다듬기 (권장)")
+        self.voice_check.setChecked(True)
+        self.voice_check.setToolTip(
+            "예배당 울림을 줄이고 목소리를 또렷하게 다듬습니다.\n"
+            "설교 영상·mp3·3분 요약에 모두 들어갑니다.\n"
+            "  · 울림 줄이기: 예배당에서 말꼬리가 뭉치는 것을 줄입니다 (잡음 제거와 다릅니다)\n"
+            "  · 발음대 강조: 말이 또렷해집니다. 휴대폰 스피커에서 특히 다릅니다\n"
+            "  · 말 사이 소음 누르기\n"
+            "소리 크기는 따로 맞추므로, 켜고 끄며 들어 봐도 크기 차이로 헷갈리지 않습니다.\n"
+            "울림 줄이기는 36분 설교에 1분쯤 걸리고, 한 번 하면 다시 쓰므로\n"
+            "같은 설교의 두 번째 내보내기부터는 시간이 들지 않습니다.")
+        adv.addWidget(self.voice_check)
 
         self.normalize_check = QCheckBox("소리 크기 맞추기 (권장)")
         self.normalize_check.setChecked(True)
@@ -875,7 +985,7 @@ class MainWindow(SummaryTab, QWidget):
         intro_row = QHBoxLayout()
         intro_row.addWidget(QLabel("시작 영상"))
         self.intro_label = QLabel("없음")
-        self.intro_label.setStyleSheet("color:#555;")
+        self.intro_label.setStyleSheet(f"color:{T.text_dim};")
         self.btn_intro = QPushButton("고르기")
         self.btn_intro_clear = QPushButton("빼기")
         for b in (self.btn_intro, self.btn_intro_clear):
@@ -891,6 +1001,19 @@ class MainWindow(SummaryTab, QWidget):
         intro_row.addWidget(self.btn_intro)
         intro_row.addWidget(self.btn_intro_clear)
         adv.addLayout(intro_row)
+
+        theme_row = QHBoxLayout()
+        theme_row.addWidget(QLabel("화면 모양"))
+        self.theme_box = QComboBox()
+        self.theme_box.addItems(list(theme_mod.THEMES.values()))
+        self.theme_box.setToolTip(
+            "화면 색과 글자 크기를 고릅니다. 고르면 바로 바뀝니다.\n\n"
+            "어두운 화면: 영상 편집 프로그램과 같은 색입니다. 영상 색이 제대로 보이고\n"
+            "  어두운 곳에서 눈이 편합니다.\n"
+            "밝은 화면: 예전 화면입니다. 밝은 사무실에서 보기 좋습니다.\n"
+            "밝은 화면 · 큰 글자: 글자와 줄 높이를 키웁니다.")
+        theme_row.addWidget(self.theme_box, 1)
+        adv.addLayout(theme_row)
 
         adv.addWidget(QLabel("구간 목록 (여러 구간을 이어붙일 때)"))
         self.clip_list = QListWidget()
@@ -944,12 +1067,13 @@ class MainWindow(SummaryTab, QWidget):
         edit.setAlignment(Qt.AlignCenter)
         edit.setFixedHeight(30)
         edit.setStyleSheet(
-            "font-size:16px; font-weight:bold; background:#ffffff; color:#1c1e21;")
+            f"font-size:{T.font_big_pt + 2}pt; font-weight:bold;"
+            f"background:{T.field_bg}; color:{T.timecode};")
         lay.addWidget(edit)
 
         here = QPushButton(f"여기가 {'시작' if is_start else '끝'}")
         here.setFixedHeight(30)
-        here.setStyleSheet("font-size:13px; font-weight:bold;")
+        here.setProperty("primary", True)
         here.setToolTip("지금 보고 있는 화면의 시각을 "
                         + ("시작" if is_start else "끝") + "으로 정합니다.")
         lay.addWidget(here)
@@ -966,7 +1090,7 @@ class MainWindow(SummaryTab, QWidget):
 
         check = QPushButton("이 지점 확인 (앞뒤 3초 재생)")
         check.setFixedHeight(25)
-        check.setStyleSheet("font-size:11px;")
+        check.setStyleSheet(f"font-size:{T.font_small_pt}pt;")
         check.clicked.connect(lambda: self._check_edge(which))
         lay.addWidget(check)
 
@@ -1003,6 +1127,94 @@ class MainWindow(SummaryTab, QWidget):
         act("Ctrl+Shift+Left", lambda: self._shift(self.edit_edge, -1.0))
         act("Ctrl+Shift+Right", lambda: self._shift(self.edit_edge, 1.0))
 
+    def _build_log_tab(self):
+        """진행 로그 칸. 위에 손볼 단추 한 줄을 둔다.
+
+        [메모리 넉넉하게 만들기] 는 윈도우의 페이징 파일을 늘린다. 이 PC 는
+        메모리 13.8GB 가 달렸는데 페이징 파일이 896MB 로 잡혀 통틀어 쓸 수
+        있는 양이 14.7GB 뿐이었고, 그래서 영상 만들기가 멈췄다. 고치는 길이
+        윈도우 고급 설정뿐인데 교회에서 쓰시는 분들은 거기까지 들어가기
+        어려우므로, 프로그램이 대신 해 드린다 (2026-10-20 사용자 요청).
+        """
+        box = QWidget()
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        self.btn_pagefile = QPushButton("메모리 넉넉하게 만들기")
+        self.btn_pagefile.clicked.connect(self.on_fix_pagefile)
+        row.addWidget(self.btn_pagefile)
+        self.lbl_pagefile = QLabel("")
+        self.lbl_pagefile.setStyleSheet(f"color:{T.text_dim};")
+        row.addWidget(self.lbl_pagefile, 1)
+        lay.addLayout(row)
+        lay.addWidget(self.log_view, 1)
+        self._refresh_pagefile_button()
+        return box
+
+    def _refresh_pagefile_button(self) -> None:
+        """단추를 지금 사정에 맞춰 켜고 끈다. 필요 없으면 아예 숨긴다."""
+        try:
+            from core import pagefile
+            need = pagefile.needs_fix()
+            now, limit = pagefile.pagefile_mb(), machine_mod.commit_limit_mb()
+        except Exception:
+            need, now, limit = False, None, None
+        self.btn_pagefile.setVisible(need)
+        self.lbl_pagefile.setVisible(need)
+        if not need:
+            return
+        here = (f"지금 통틀어 쓸 수 있는 양 {limit / 1024:.1f}GB "
+                f"(페이징 파일 {now / 1024:.1f}GB)" if limit and now is not None else "")
+        self.lbl_pagefile.setText(
+            "영상 만들기가 메모리 때문에 멈춘다면 이 단추를 눌러 주세요 — " + here)
+        self.btn_pagefile.setToolTip(
+            "윈도우가 통틀어 내주는 메모리를 늘립니다.\n"
+            "관리자 권한을 한 번 묻고, 바꾼 뒤 윈도우를 다시 시작하면 적용됩니다.\n"
+            "언제든 윈도우 설정에서 '자동 관리' 로 되돌릴 수 있습니다.")
+
+    def on_fix_pagefile(self) -> None:
+        """[메모리 넉넉하게 만들기] — 무엇을 바꿀지 보여 주고, 허락받고 바꾼다."""
+        from core import pagefile
+
+        plan = pagefile.plan()
+        if not plan.get("ok"):
+            QMessageBox.information(self, "메모리 넉넉하게 만들기", plan.get("why", ""))
+            self.log("[메모리] " + plan.get("why", "").replace("\n", " "))
+            return
+
+        ask = QMessageBox(self)
+        ask.setWindowTitle("메모리 넉넉하게 만들기")
+        ask.setIcon(QMessageBox.Question)
+        ask.setText("윈도우가 통틀어 내주는 메모리를 늘립니다.")
+        ask.setInformativeText(plan["why"])
+        ask.setStandardButtons(QMessageBox.Yes | QMessageBox.Cancel)
+        ask.button(QMessageBox.Yes).setText("바꾸기")
+        ask.button(QMessageBox.Cancel).setText("그만두기")
+        ask.setDefaultButton(QMessageBox.Yes)
+        if ask.exec() != QMessageBox.Yes:
+            self.log("[메모리] 바꾸지 않았습니다")
+            return
+
+        self.log("[메모리] 페이징 파일을 "
+                 f"{plan['initial'] / 1024:.0f}GB(최대 {plan['max'] / 1024:.0f}GB) 로 잡습니다")
+        self.btn_pagefile.setEnabled(False)
+        try:
+            got = pagefile.apply(say=lambda t: self.log("  " + t))
+        finally:
+            self.btn_pagefile.setEnabled(True)
+        for line in str(got.get("message", "")).split("\n"):
+            if line:
+                self.log("  " + line)
+        if got.get("ok"):
+            QMessageBox.information(self, "메모리 넉넉하게 만들기", got["message"])
+        else:
+            QMessageBox.warning(self, "메모리 넉넉하게 만들기",
+                                got.get("message", "바꾸지 못했습니다."))
+        self._refresh_pagefile_button()
+
     def _startup_check(self) -> None:
         """시작할 때 무엇이 되고 무엇이 안 되는지 확인해 로그에 남긴다.
 
@@ -1014,7 +1226,30 @@ class MainWindow(SummaryTab, QWidget):
         from core.voiceprint import EMBED_MODEL, MODEL_DIR_CANDIDATES
 
         cfg = self._config()
-        self.log_step("창의진교회 설교영상 편집기", "프로그램 구성을 확인합니다")
+        self.log_step(f"창의진교회 설교영상 편집기 {version_mod.full()}",
+                      "프로그램 구성을 확인합니다")
+        self.log(f"  [컴퓨터] {machine_mod.summary()}")
+        self.log(f"  [기록] {getattr(self, '_log_why', '(모름)')}")
+        # 지난번에 메모리가 모자라 창째 사라졌다면, 우리가 띄워 둔 도우미가
+        # 남아 메모리를 계속 잡고 있다. 켤 때 치워서 넉넉한 상태로 시작한다.
+        try:
+            from core import cleanup
+            left = cleanup.leftovers()
+            if left:
+                self.log(f"  [정리] 지난번에 남은 {len(left)}개를 치웁니다")
+                for pid, path in left:
+                    self.log(f"         {path.name} (번호 {pid})")
+                cleanup.sweep(left)
+                self.log(f"  [컴퓨터] 치운 뒤: {machine_mod.summary()}")
+        except Exception as exc:
+            self.log(f"  [정리] 건너뜁니다 — {exc}")
+        # 메모리가 빠듯하면 일을 시작하기 전에 미리 알려 준다. 돌다가 멈추면
+        # 기다린 시간이 통째로 날아가고, 무엇이 문제인지도 알기 어렵다.
+        tip = machine_mod.advice()
+        if tip:
+            for i, line in enumerate(textwrap.wrap(tip, 70)):
+                self.log(("  [주의] " if i == 0 else "         ") + line)
+            self.log("         자막 만들기는 메모리를 많이 씁니다 — 모자라면 작은 모델로 자동으로 바꿉니다.")
 
         tools = {name: find_tool(name) for name in ("ffmpeg", "ffprobe", "yt-dlp")}
         for name, path in tools.items():
@@ -1027,6 +1262,21 @@ class MainWindow(SummaryTab, QWidget):
         self.log(f"  [{'OK ' if has_sherpa else '없음'}] 성문 검출 엔진 (sherpa-onnx)")
         self.log(f"  [{'OK ' if model else '없음'}] 성문 모델 {EMBED_MODEL}")
         self.log(f"  [{'OK ' if has_vp else '없음'}] 목사님 성문")
+
+        # AI 모델이 어디서 찾아졌는지 남긴다. 2026-10-20 에 모델이 PC 안에
+        # 멀쩡히 있는데도 "아직 없음" 이 떠서 한참 헤맸다. 자리를 적어 두면
+        # 다음에는 기록만 보고 바로 안다.
+        try:
+            from core import embed as embed_mod, llm as llm_mod
+            emb_ok = embed_mod.is_ready(cfg)
+            self.log(f"  [{'OK ' if emb_ok else '없음'}] 뜻 보기 모델"
+                     + (f" — {embed_mod.model_dir(cfg)}" if emb_ok else ""))
+            ai = llm_mod.model_path(cfg)
+            self.log(f"  [{'OK ' if ai.exists() else '없음'}] AI 모델 {ai.name}"
+                     + (f" — {ai.parent}" if ai.exists() else "")
+                     + (" (이 교회 설교로 학습한 모델)" if llm_mod.is_tuned(cfg) else ""))
+        except Exception as exc:
+            self.log(f"  [없음] AI 모델 확인 실패 — {exc}")
 
         auto_ok = has_sherpa and model is not None and has_vp
         self.btn_quick.setEnabled(auto_ok)
@@ -1087,6 +1337,8 @@ class MainWindow(SummaryTab, QWidget):
             self.stop_at = None
             self.player.pause()
             self.btn_play.setText("▶ 재생")
+        if getattr(self, "_preview", None):
+            self._preview_tick(seconds)          # [3분 요약] 미리보기: 다음 조각으로 건너뛰기
 
     def _play_span(self, start: float, end: float) -> None:
         self.stop_at = end
@@ -1390,14 +1642,50 @@ class MainWindow(SummaryTab, QWidget):
             self._refresh_clips(new)
 
     # ============================================================== 작업
+    def _open_run_log(self):
+        """이번에 켠 기록을 담을 파일. 창이 그냥 사라져도 단서가 남는다.
+
+        메모리가 모자라면 계산 라이브러리가 오류를 던지지 못하고 프로그램을
+        통째로 끝내 버린다 (2026-10-20 교회 PC). 그러면 화면의 진행 로그가
+        같이 사라져 무엇을 하다 죽었는지 알 길이 없었다.
+        """
+        try:
+            path = Path(self.cfg.work_dir) / "실행기록.txt"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if path.exists() and path.stat().st_size > 2 * 2 ** 20:
+                path.unlink()                       # 너무 커지면 새로 시작
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(f"\n===== {time.strftime('%Y-%m-%d %H:%M:%S')} 켬 =====\n")
+                fh.write(f"  이 컴퓨터: {machine_mod.summary()}\n")
+            import faulthandler
+            self._crash_file = path.open("a", encoding="utf-8", buffering=1)
+            faulthandler.enable(file=self._crash_file)   # 통째로 죽어도 자취를 남긴다
+            self._log_why = f"기록 파일: {path}"
+            return path
+        except Exception as exc:
+            # 조용히 실패하면 나중에 "왜 기록이 안 남지" 를 알 길이 없다.
+            self._log_why = f"기록 파일을 열지 못했습니다 ({type(exc).__name__}: {exc})"
+            return None
+
     def log(self, text: str) -> None:
         self.log_view.appendPlainText(text)
         bar = self.log_view.verticalScrollBar()
         bar.setValue(bar.maximum())
+        if getattr(self, "_log_path", None):
+            try:
+                with self._log_path.open("a", encoding="utf-8") as fh:
+                    fh.write(text + "\n")
+            except OSError:
+                pass                                 # 기록 실패가 일을 막으면 안 된다
 
     def log_step(self, title: str, detail: str = "") -> None:
         """새 작업이 시작될 때. 앞 작업과 확실히 갈라 보이게 한다."""
         now = time.strftime("%H:%M:%S")
+        if getattr(self, "_busy", False) and hasattr(self, "header"):
+            # 진행 로그는 [기록] 안에 있어 다른 모드에서는 안 보인다.
+            # 돌고 있다는 사실만은 머리띠에 띄워 어디서든 보이게 한다.
+            # **도는 동안에만** 띄운다 — 켤 때 찍는 시작 알림은 작업이 아니다.
+            self.header.set_progress(f"{title} 중…")
         self.log("")
         self.log("━" * 60)
         self.log(f"  {title}          {now}")
@@ -1408,6 +1696,8 @@ class MainWindow(SummaryTab, QWidget):
     def log_done(self, message: str, seconds: float | None = None,
                  next_step: str = "") -> None:
         """작업이 끝났을 때. 얼마나 걸렸는지와 다음에 할 일을 알려 준다."""
+        if hasattr(self, "header"):
+            self.header.set_progress("")      # 끝났으니 다시 영상 이름을 보여 준다
         took = ""
         if seconds is not None:
             took = (f"  ({seconds:.0f}초)" if seconds < 60
@@ -1418,10 +1708,59 @@ class MainWindow(SummaryTab, QWidget):
             self.log(f"  → 다음:  {next_step}")
         self.log("")
 
+    def _release_models(self) -> None:
+        """다 쓴 모델을 메모리에서 내려놓는다.
+
+        자막 모델이 1GB 안팎, 문장 임베딩 모델이 300MB 안팎을 잡고 있다. 한 번
+        올리면 프로그램을 닫을 때까지 그대로 남아 있어서, 자막을 만든 뒤 영상을
+        만들면 그만큼 모자란 상태에서 시작하게 된다. 둘 중 하나가 실패해도
+        다른 하나는 내려놓도록 따로 감싼다.
+        """
+        try:
+            transcribe.release_model()          # 자막 모델 (1GB 안팎)
+        except Exception:
+            pass
+        try:
+            from core import embed as embed_mod
+            embed_mod.release_model()           # 문장 임베딩 모델 (300MB 안팎)
+        except Exception:
+            pass
+        gc.collect()
+
     def _set_busy(self, busy: bool) -> None:
+        self._busy = busy
+        if not busy:
+            # 일이 끝나면 올려 둔 모델들을 내려놓는다. 쥐고 있으면 다음 일(영상
+            # 만들기)이 쓸 메모리가 1GB 넘게 줄어, 빠듯한 PC 는 거기서 실패한다.
+            self._release_models()
+        if hasattr(self, "header"):
+            # 모드 탭도 같이 잠근다. 안 잠그면 눌릴 것처럼 보이고 실제로 눌려서,
+            # 돌고 있는 작업과 화면이 어긋난다 (2026-10-20 사용자 지적).
+            self.header.set_busy(busy)
+            # 시작할 때는 두루뭉술하게 적고, 바로 뒤의 log_step 이 진짜 이름으로 바꾼다.
+            # 끝나면 지운다 — 작업이 중간에 멈춰도 글이 남지 않는다.
+            self.header.set_progress("작업 중…" if busy else "")
+        # 칸을 통째로 잠근다. 위젯 이름을 손으로 적어 두면 새로 더할 때마다 빠뜨린다 —
+        # 실제로 [여기가 시작]·[여기가 끝]·[이 지점 확인] 넷이 빠져서, 요약 영상을
+        # 만드는 중에 구간을 바꿀 수 있었다 (2026-10-20 사용자 지적).
+        # 부모를 잠가도 자식이 따로 꺼 둔 상태는 그대로 남으므로 안전하다.
+        for box in (getattr(self, "toolbar_box", None), getattr(self, "editor_scroll", None),
+                    getattr(self, "summary_tab", None)):
+            if box is not None:
+                box.setEnabled(not busy)
+
+        # 아래 목록은 위 칸 밖에 있거나, 무엇을 잠그는지 분명히 해 두려고 남긴다.
+        if hasattr(self, "btn_pagefile"):
+            # 일하는 중에 페이징 파일을 바꾸면 돌고 있는 ffmpeg 가 휘말린다
+            self.btn_pagefile.setEnabled(not busy)
         for w in (self.btn_fetch, self.btn_open, self.btn_manual, self.btn_quick,
                   self.btn_load, self.btn_export, self.btn_mp3, self.btn_save,
-                  self.btn_undo, self.btn_restore_ai):
+                  self.btn_undo, self.btn_restore_ai,
+                  self.btn_start_here, self.btn_end_here,
+                  self.btn_start_check, self.btn_end_check,
+                  # 자막도 잠근다. 도는 동안 고치면, 작업이 끝날 때 자막이 통째로
+                  # 새로 들어오면서 그 편집이 소리 없이 사라진다. 진행 로그만 열어 둔다.
+                  self.subtitle_list):
             w.setEnabled(not busy)
 
         # 구간을 만지는 것도 잠근다. 작업이 끝나면 _apply_marker 가 구간을 통째로
@@ -1432,7 +1771,11 @@ class MainWindow(SummaryTab, QWidget):
                   self.btn_edge_start, self.btn_edge_end,
                   self.btn_sum_pick, self.btn_sum_undo, self.btn_sum_make,
                   self.btn_sum_mp3,
-                  self.pick_mode_box, self.btn_ai_get, self.sum_list):
+                  self.pick_mode_box, self.btn_ai_get, self.sum_list,
+                  self.sum_format_box, self.sum_slot_box,
+                  self.btn_sum_preview, self.btn_sum_hear, self.btn_sum_edit,
+                  self.voice_check, self.denoise_box, self.normalize_check,
+                  self.theme_box):
             w.setEnabled(not busy)
         if busy:
             self.btn_ai_get.setEnabled(False)
@@ -1457,9 +1800,13 @@ class MainWindow(SummaryTab, QWidget):
         include_bene = st.value("include_bene", False, type=bool)
         intro = str(st.value("intro_path", "") or "")
         pick = str(st.value("pick_mode", "embed"))
+        fmt = str(st.value("summary_format", "two"))
+        voice = st.value("voice_fx", True, type=bool)
+        th = saved_theme()
 
         widgets = (self.subtitle_box, self.denoise_box,
-                   self.normalize_check, self.bene_check, self.pick_mode_box)
+                   self.normalize_check, self.bene_check, self.pick_mode_box,
+                   self.sum_format_box, self.voice_check, self.theme_box)
         for w in widgets:
             w.blockSignals(True)
         for label, mode in self.SUBTITLE_CHOICES.items():
@@ -1471,11 +1818,17 @@ class MainWindow(SummaryTab, QWidget):
                 self.denoise_box.setCurrentText(label)
                 break
         self.normalize_check.setChecked(normalize)
+        self.voice_check.setChecked(voice)
         self.bene_check.setChecked(include_bene)
         for label, mode in self.PICK_CHOICES.items():
             if mode == pick:
                 self.pick_mode_box.setCurrentText(label)
                 break
+        for key, label in blocks_mod.FORMATS.items():
+            if key == fmt:
+                self.sum_format_box.setCurrentText(label)
+                break
+        self.theme_box.setCurrentText(theme_mod.THEMES.get(th, theme_mod.THEMES["dark"]))
         for w in widgets:
             w.blockSignals(False)
 
@@ -1485,7 +1838,9 @@ class MainWindow(SummaryTab, QWidget):
         self.subtitle_box.currentTextChanged.connect(self._save_prefs)
         self.denoise_box.currentTextChanged.connect(self._save_prefs)
         self.normalize_check.toggled.connect(self._save_prefs)
+        self.voice_check.toggled.connect(self._save_prefs)
         self.bene_check.toggled.connect(self._save_prefs)
+        self.theme_box.currentTextChanged.connect(self._on_theme_changed)
         self._update_ai_status()
 
     def _save_prefs(self, *_args) -> None:
@@ -1495,17 +1850,58 @@ class MainWindow(SummaryTab, QWidget):
         s.setValue("denoise",
                    self.DENOISE_CHOICES.get(self.denoise_box.currentText(), "light"))
         s.setValue("normalize", self.normalize_check.isChecked())
+        if hasattr(self, "voice_check"):
+            s.setValue("voice_fx", self.voice_check.isChecked())
+        if hasattr(self, "theme_box"):
+            s.setValue("theme", self._theme_key())
         s.setValue("include_bene", self.bene_check.isChecked())
         s.setValue("intro_path", self.intro_path)
+        if hasattr(self, "sum_format_box"):
+            s.setValue("summary_format", self._sum_format())
         if hasattr(self, "pick_mode_box"):
             s.setValue("pick_mode",
                        self.PICK_CHOICES.get(self.pick_mode_box.currentText(), "embed"))
+
+    def _theme_key(self) -> str:
+        label = self.theme_box.currentText()
+        for key, name in theme_mod.THEMES.items():
+            if name == label:
+                return key
+        return "dark"
+
+    def _on_theme_changed(self, *_a) -> None:
+        """고른 화면 모양을 바로 입힌다.
+
+        위젯마다 박아 둔 색(큰 글자·강조 단추 등)은 만들 때 한 번만 들어가므로,
+        전체를 다시 그리려면 프로그램을 다시 켜야 완전히 바뀐다. 대부분은 바로
+        바뀌므로 다시 켜라고만 알린다 — 작업 중인 구간을 잃게 할 수는 없다.
+        """
+        self._save_prefs()
+        apply_theme(QApplication.instance(), self._theme_key())
+        self._refresh_header_theme()
+        self.log("화면 모양을 바꿨습니다. 프로그램을 다시 켜면 모든 칸에 적용됩니다.")
+
+    def _refresh_header_theme(self) -> None:
+        """머리띠에 지금 화면 모양 이름을 적고, 글자 크기에 맞춰 높이를 다시 잡는다."""
+        if not hasattr(self, "header"):
+            return
+        # 상자의 글자가 아니라 **실제로 입혀진** 테마를 적는다. 둘이 어긋나면
+        # 화면은 어두운데 "밝은 화면" 이라고 적히는 일이 생긴다.
+        self.header.set_corner(theme_mod.THEMES.get(theme_mod.current().name, ""))
+        self.header.refresh_theme()
+        for strip in self.findChildren(ui_header._Strip):
+            strip.refresh_theme()
 
     def _config(self) -> Config:
         cfg = Config()
         if hasattr(self, "normalize_check"):
             cfg.normalize_audio = self.normalize_check.isChecked()
             cfg.denoise = self.DENOISE_CHOICES.get(self.denoise_box.currentText(), "light")
+        if hasattr(self, "voice_check"):
+            on = self.voice_check.isChecked()
+            cfg.enhance_speech = on
+            if not on:
+                cfg.dereverb_amount = 0.0
         if hasattr(self, "subtitle_box"):
             cfg.subtitle_mode = self.SUBTITLE_CHOICES.get(
                 self.subtitle_box.currentText(), "embed")
@@ -1521,21 +1917,35 @@ class MainWindow(SummaryTab, QWidget):
         return cfg
 
     def _run(self, fn, on_done, title: str = "작업", detail: str = "",
-             done_message: str = "끝났습니다", next_step: str = "") -> None:
+             done_message: str = "끝났습니다", next_step: str = "",
+             est_kind: str = "", est_minutes: float = 0.0, est_model: str = "") -> None:
         if self.worker and self.worker.isRunning():
             QMessageBox.information(self, "실행 중", "이미 작업이 돌고 있습니다.")
             return
+        # 하던 자리를 기억해 둔다. 작업이 끝나면 거기로 돌려놓는다 — 진행 로그에
+        # 남겨 두면 "내가 뭘 누른 거지" 싶게 된다 (2026-10-20 사용자 지적).
+        self._mode_before_job = self.tabs.currentIndex()
         self._set_busy(True)
-        self.tabs.setCurrentWidget(self.log_view)   # 진행 로그 탭을 바로 보여준다
-        self.log_step(title, detail)
-        self.hint.setText(f"{title} 하는 중입니다...  아래 진행 로그를 보세요.")
+        self.tabs.setCurrentIndex(self.TAB_LOG)     # 도는 동안은 진행 로그를 보여준다
+        # 얼마나 걸릴지 미리 알려 준다. 느린 PC 에서는 한 시간이 넘을 수도 있어,
+        # 모르고 기다리는 것이 제일 답답하다. 실제로 걸린 시간은 아래에서 기록해
+        # 두었다가 다음부터 이 PC 의 기록으로 말한다.
+        guess = machine_mod.estimate(est_kind, est_minutes, self.cfg.work_dir, est_model) \
+            if est_kind else ""
+        self.log_step(title, " · ".join(x for x in (detail, guess) if x))
+        self.hint.setText(f"{title} 하는 중입니다{('  ·  ' + guess) if guess else ''}"
+                          "  —  [기록] 에서 진행 상황을 볼 수 있습니다.")
         QApplication.processEvents()
 
         started = time.monotonic()
 
         def finished(result):
             self._set_busy(False)
-            self.log_done(done_message, time.monotonic() - started, next_step)
+            self._restore_mode()
+            took = time.monotonic() - started
+            if est_kind and est_minutes > 0:
+                machine_mod.remember(est_kind, est_minutes, took, self.cfg.work_dir)
+            self.log_done(done_message, took, next_step)
             on_done(result)
             self._update_hint()
 
@@ -1544,6 +1954,13 @@ class MainWindow(SummaryTab, QWidget):
         self.worker.done.connect(finished)
         self.worker.failed.connect(self._on_failed)
         self.worker.start()
+
+    def _restore_mode(self) -> None:
+        """작업 전에 보던 칸으로 돌려놓는다. 진행 로그를 보고 있었으면 그대로 둔다."""
+        back = getattr(self, "_mode_before_job", None)
+        self._mode_before_job = None
+        if back is not None and 0 <= back < self.tabs.count() and back != self.TAB_LOG:
+            self.tabs.setCurrentIndex(back)
 
     def _on_failed(self, message: str) -> None:
         self._set_busy(False)
@@ -1556,6 +1973,9 @@ class MainWindow(SummaryTab, QWidget):
         QMessageBox.critical(self, "오류", message[:1200])
 
     def _update_hint(self) -> None:
+        if hasattr(self, "header"):
+            # 머리띠 가운데에는 지금 다루는 영상 이름을 적는다 (FilmCraft 와 같은 자리)
+            self.header.set_title(self.media_path.name if self.media_path else "")
         if not self.media_path:
             self.hint.setText("먼저 유튜브 주소를 붙여넣고 [영상 가져오기]를 누르세요.")
         elif not self.marker or not self.marker.clips:
@@ -1631,6 +2051,43 @@ class MainWindow(SummaryTab, QWidget):
                 self._refresh_clips()
         self._load_media(chosen)
 
+    def _ask_stt(self) -> str:
+        """[자동으로 찾기] 를 누르면 자막도 만들지 묻는다. 'yes' / 'no' / 'cancel'.
+
+        [자막도] 칸을 못 보고 지나치는 일이 많았다 — 자막 없이 찾고 나서 [3분 요약] 에서
+        다시 20~40분을 기다리게 된다. 누르는 순간 한 번 물어 둘 중 하나를 고르게 한다.
+        """
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Question)
+        box.setWindowTitle("자막도 만들까요?")
+        box.setText(
+            "[자동으로 찾기] 는 목사님 목소리로 설교 구간을 찾습니다. 1~2분이면 끝납니다.\n\n"
+            "자막도 함께 만들면\n"
+            "  · 설교 영상에 자막을 넣을 수 있고\n"
+            "  · [3분 요약] 을 바로 쓸 수 있습니다.\n"
+            "대신 20~40분이 더 걸립니다.")
+        yes = box.addButton("자막도 만들기 (20~40분 더)", QMessageBox.YesRole)
+        no = box.addButton("설교 구간만 찾기 (1~2분)", QMessageBox.NoRole)
+        box.addButton("취소", QMessageBox.RejectRole)
+        box.setDefaultButton(no)
+        box.exec()
+        clicked = box.clickedButton()
+        return "yes" if clicked is yes else "no" if clicked is no else "cancel"
+
+    def on_quick(self) -> None:
+        """[자동으로 찾기]. 자막 엔진이 있고 [자막도] 가 꺼져 있으면 먼저 묻는다."""
+        if not self.stt_check.isEnabled():          # 자막 엔진이 없는 설치본
+            self.on_analyze(with_stt=False)
+            return
+        if self.stt_check.isChecked():              # 이미 켜 두셨으면 묻지 않는다
+            self.on_analyze(with_stt=True)
+            return
+        answer = self._ask_stt()
+        if answer == "cancel":
+            return
+        self.stt_check.setChecked(answer == "yes")  # 고른 대로 칸에도 보이게
+        self.on_analyze(with_stt=(answer == "yes"))
+
     def on_analyze(self, with_stt: bool, then=None) -> None:
         url = self.url_edit.text().strip() or (self.marker.url if self.marker else "")
         local = self.media_path if (self.media_path and self.media_path.exists()) else None
@@ -1702,6 +2159,11 @@ class MainWindow(SummaryTab, QWidget):
                 marker.pastor_speaker = det.pastor
 
             transcript: list[dict] = []
+            if not with_stt:
+                # 구간만 다시 찾을 때 예전에 만든 자막을 버리지 않는다 (있으면 그대로 쓴다)
+                transcript = transcribe.load_transcript(cfg.transcript_path(vid))
+                if transcript:
+                    print(f"  예전에 만든 자막 {len(transcript)}문장을 그대로 씁니다")
             if with_stt:
                 if not wav.exists():
                     print("자막용 오디오 준비 중")
@@ -1745,7 +2207,8 @@ class MainWindow(SummaryTab, QWidget):
                   detail=("자막까지 만듭니다 — 20~40분 더 걸립니다" if with_stt
                           else "목사님 목소리를 대조해 설교와 축도를 찾습니다 (1~2분)"),
                   done_message="설교 구간을 찾았습니다",
-                  next_step="시각을 확인하고 [3. 설교 영상 만들기]")
+                  next_step="시각을 확인하고 [3. 설교 영상 만들기]",
+                  est_kind="find", est_minutes=getattr(self.range_bar, "duration", 0.0) / 60)
 
     def transcribe_current(self, then=None) -> None:
         """지금 정해 둔 구간 그대로 자막만 만든다. 구간은 건드리지 않는다.
@@ -1787,8 +2250,9 @@ class MainWindow(SummaryTab, QWidget):
                 QTimer.singleShot(0, then)
 
         self._run(job, done, title="자막 만들기",
-                  detail=f"정해 둔 구간 {total / 60:.0f}분의 자막을 만듭니다 — CPU 에서 20~40분",
-                  done_message="자막을 만들었습니다")
+                  detail=f"정해 둔 구간 {total / 60:.0f}분의 자막을 만듭니다",
+                  done_message="자막을 만들었습니다",
+                  est_kind="stt", est_minutes=total / 60, est_model=cfg.whisper_model)
 
     def on_load(self) -> None:
         cfg = self._config()
@@ -1949,7 +2413,8 @@ class MainWindow(SummaryTab, QWidget):
                   detail=(f"{total / 60:.0f}분   소리만 뽑습니다   "
                           + ("설교 + 축도" if has_bene else "설교만")),
                   done_message="mp3 를 만들었습니다",
-                  next_step="[폴더 열기] 로 확인하세요")
+                  next_step="[폴더 열기] 로 확인하세요",
+                  est_kind="export", est_minutes=total / 60)
 
     def on_export(self) -> None:
         if not self.marker or not self.marker.clips:
@@ -2039,7 +2504,8 @@ class MainWindow(SummaryTab, QWidget):
                              if transcript and self._config().subtitle_mode == "burn"
                              else "")),
                   done_message="영상을 만들었습니다",
-                  next_step="[폴더 열기] 로 결과를 확인하세요")
+                  next_step="[폴더 열기] 로 결과를 확인하세요",
+                  est_kind="export", est_minutes=mins)
 
     # ============================================================== 표시
     def _reset_session(self) -> None:
@@ -2059,6 +2525,7 @@ class MainWindow(SummaryTab, QWidget):
         self.sum_outline = hl_mod.Outline()
         self.sum_pauses = []
         self.sum_undo = []
+        self._reset_summary_blocks()
         self.sum_list.blockSignals(True)
         self.sum_list.clear()
         self.sum_list.blockSignals(False)
@@ -2152,6 +2619,7 @@ class MainWindow(SummaryTab, QWidget):
         self.sum_outline = hl_mod.Outline()
         self.sum_pauses = []
         self.sum_undo = []
+        self._reset_summary_blocks()
         rng = marker.sermon_range()
         if not rng or not self.transcript or not marker.summary_picks:
             self.sum_list.blockSignals(True)
@@ -2193,47 +2661,54 @@ def export_local_wrapper(marker, cfg, src, transcript, exact):
     return export_mod.export_local(marker, cfg, src, transcript, reencode=exact)
 
 
-def apply_light_theme(app: QApplication) -> None:
-    """OS 테마와 무관하게 늘 같은 밝은 화면으로 고정한다.
+def apply_theme(app: QApplication, name: str = "dark") -> None:
+    """화면 색을 통째로 갈아 끼운다 (theme.py 의 토큰).
 
-    윈도우가 다크 모드면 Qt 가 어두운 팔레트를 쓰는데, 타임라인·정밀 조정 바를
-    밝은 색으로 직접 그리고 있어 화면이 반쪽만 어두워진다. PC 마다 화면이 달라
-    보이면 설명서와도 어긋나므로 밝은 쪽으로 통일한다.
+    OS 가 다크 모드든 아니든 늘 같은 화면으로 고정한다. PC 마다 달라 보이면
+    설명서와 어긋나기 때문이다.
+
+    팔레트와 스타일시트를 **둘 다** 설정한다. 스타일시트가 안 닿는 곳(기본
+    대화상자, 직접 그리는 위젯의 기본 펜 색)은 팔레트가 맡는다.
     """
+    global T
+    T = theme_mod.use(name)        # 직접 그리는 위젯들이 theme.current() 로 읽는다
     app.setStyle("Fusion")
 
     p = QPalette()
-    p.setColor(QPalette.Window, QColor(245, 246, 248))
-    p.setColor(QPalette.WindowText, QColor(28, 30, 33))
-    p.setColor(QPalette.Base, QColor(255, 255, 255))
-    p.setColor(QPalette.AlternateBase, QColor(240, 241, 244))
-    p.setColor(QPalette.Text, QColor(28, 30, 33))
-    p.setColor(QPalette.PlaceholderText, QColor(138, 143, 152))
-    p.setColor(QPalette.Button, QColor(236, 238, 241))
-    p.setColor(QPalette.ButtonText, QColor(28, 30, 33))
-    p.setColor(QPalette.Highlight, QColor(47, 111, 208))
-    p.setColor(QPalette.HighlightedText, QColor(255, 255, 255))
-    p.setColor(QPalette.ToolTipBase, QColor(255, 255, 225))
-    p.setColor(QPalette.ToolTipText, QColor(20, 20, 20))
-    p.setColor(QPalette.Link, QColor(47, 111, 208))
+    p.setColor(QPalette.Window, _c(T.panel_bg))
+    p.setColor(QPalette.WindowText, _c(T.text))
+    p.setColor(QPalette.Base, _c(T.field_bg))
+    p.setColor(QPalette.AlternateBase, _c(T.row_alt))
+    p.setColor(QPalette.Text, _c(T.text))
+    p.setColor(QPalette.PlaceholderText, _c(T.text_faint))
+    p.setColor(QPalette.Button, _c(T.button_bg))
+    p.setColor(QPalette.ButtonText, _c(T.text))
+    p.setColor(QPalette.Highlight, _c(T.accent))
+    p.setColor(QPalette.HighlightedText, _c(T.text_on_accent))
+    p.setColor(QPalette.ToolTipBase, _c(T.header_bg))
+    p.setColor(QPalette.ToolTipText, _c(T.text))
+    p.setColor(QPalette.Link, _c(T.hot_text))
 
-    grey = QColor(150, 154, 160)
     for role in (QPalette.WindowText, QPalette.Text, QPalette.ButtonText):
-        p.setColor(QPalette.Disabled, role, grey)
+        p.setColor(QPalette.Disabled, role, _c(T.disabled_text))
 
     app.setPalette(p)
-    app.setStyleSheet(
-        "QGroupBox { font-weight: bold; border: 1px solid #d5d8de;"
-        " border-radius: 5px; margin-top: 10px; padding-top: 8px; }"
-        "QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; }"
-        "QPushButton { padding: 4px 10px; }"
-        "QPushButton:disabled { color: #9a9ea6; }"
-    )
+    app.setStyleSheet(theme_mod.stylesheet(T))
+
+    font = app.font()
+    font.setPointSize(T.font_pt)
+    app.setFont(font)
+
+
+def saved_theme() -> str:
+    """지난번에 고른 화면 모양. 처음이면 어두운 화면."""
+    name = str(QSettings("창의진교회", "SermonTool").value("theme", "dark"))
+    return name if name in theme_mod.THEMES else "dark"
 
 
 def main() -> int:
     app = QApplication(sys.argv)
-    apply_light_theme(app)
+    apply_theme(app, saved_theme())
     win = MainWindow()
     if win._small_screen:
         # 노트북처럼 세로가 좁으면 처음부터 최대화한다. Windows 가 작업 표시줄과

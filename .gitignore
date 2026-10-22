@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 .venv/
+.venv-train/
 data/
 .env
 .hf_token
@@ -8,3 +9,15 @@ bin/*.exe
 dist/
 build/
 Output/
+
+# 다른 PC 로 옮기려고 모아 둔 것. GitHub 에는 올리지 않는다 (2.5GB 모델이 들어 있다).
+옮길것_AI모델/
+
+# 어디 있든 올리면 안 되는 큰 파일들 (GitHub 는 100MB 넘으면 거절한다)
+*.gguf
+*.safetensors
+*.wav
+*.mp4
+*.mp3
+*.mkv
+*.webm

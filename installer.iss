@@ -7,7 +7,8 @@
 
 #define AppName "SermonTool"
 #define AppVerName "창의진교회 설교영상 편집기"
-#define AppVersion "1.2.0"
+; 버전은 core/version.py 한 곳에서 정한다. build_exe.py 가 version.iss 를 만들어 준다.
+#include "version.iss"
 #define AppPublisher "homily"
 #define AppExeName "SermonTool.exe"
 
@@ -42,8 +43,16 @@ Name: "startmenuicon"; Description: "시작 메뉴 바로가기 만들기"; Grou
 ;   - SermonTool.exe, PySide6, sherpa-onnx(성문 검출)
 ;   - bin\ : ffmpeg, ffprobe, yt-dlp, deno, models\campplus.onnx
 ;   - voiceprint.npz : 목사 성문 (사용자 폴더에 없으면 이걸 쓴다)
-Source: "dist\SermonTool\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+;   - 고칠말.txt : 지금까지 모아 둔 오인식 사전 (첫 실행 때 사용자 폴더로 옮겨 간다)
+; models\ 는 아래에서 따로 담는다 — 여기서는 뺀다
+Source: "dist\SermonTool\*"; DestDir: "{app}"; Excludes: "models\*"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "README.md"; DestDir: "{app}"; Flags: ignoreversion isreadme
+
+; AI 모델 (뜻 보기 135MB + 설교로 학습시킨 모델 2.5GB).
+; gguf·onnx 는 이미 압축된 파일이라 다시 압축해 봐야 거의 안 줄고 시간만 몇십 분
+; 걸린다. nocompression 으로 그대로 담는다. 설치본이 2.6GB 쯤 커지는 대신,
+; 받는 분이 따로 내려받을 것이 없다.
+Source: "dist\SermonTool\models\*"; DestDir: "{app}\models"; Flags: ignoreversion recursesubdirs createallsubdirs nocompression
 
 [Icons]
 Name: "{group}\{#AppVerName}"; Filename: "{app}\{#AppExeName}"; Tasks: startmenuicon

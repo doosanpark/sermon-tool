@@ -174,23 +174,63 @@ def summary_runs(marker: Marker, cfg: Config, transcript: list[dict],
     return out
 
 
+def voice_audio(marker: Marker, cfg: Config, src: Path) -> Path | None:
+    """울림을 줄인 소리를 미리 만들어 둔다. 설정이 꺼져 있거나 실패하면 None.
+
+    네 가지 내보내기(설교 영상·설교 mp3·3분 요약 영상·3분 요약 mp3)가 모두 이
+    함수를 부른다. 결과는 data/cache 에 남으므로 두 번째부터는 다시 계산하지 않는다.
+    """
+    try:
+        from . import voicefx
+        return voicefx.voice_wav(Path(src), cfg, marker.video_id)
+    except Exception as exc:        # 덧붙이는 기능이다 — 무슨 일이 있어도 원본으로 간다
+        print(f"  울림 줄이기를 건너뜁니다 ({type(exc).__name__}: {exc})")
+        return None
+
+
+def say_audio_steps(cfg: Config, voice: Path | None) -> None:
+    """소리에 무엇을 하는지 한 줄씩 알린다."""
+    if voice is not None:
+        print("  예배당 울림을 줄인 소리를 씁니다")
+    if getattr(cfg, "enhance_speech", False):
+        print("  목소리를 또렷하게 다듬습니다 (발음대 강조·말 사이 소음 누르기)")
+    if cfg.denoise:
+        print(f"  잡음 제거: {'약하게' if cfg.denoise == 'light' else '강하게'}")
+    if cfg.normalize_audio:
+        print(f"  소리 크기를 방송 표준({cfg.target_lufs:.0f} LUFS)에 맞춥니다")
+
+
+def summary_tag(marker: Marker) -> str:
+    """고른 형식에 맞는 이름표. 만드는 파일 이름과 mp3 제목에 쓴다.
+
+    1분 40초짜리를 '3분요약.mp4' 로 저장하면 나중에 파일만 보고는 무엇인지
+    알 수 없다. 그래서 고른 형식을 그대로 이름에 적는다.
+    """
+    from . import blocks
+
+    return blocks.short_name(getattr(marker, "summary_format", "") or "two").replace(" ", "")
+
+
 def export_summary(marker: Marker, cfg: Config, src: Path,
                    transcript: list[dict], wav: Path | None = None) -> dict:
-    """3분 요약 세로 영상을 만든다."""
+    """요약 세로 영상을 만든다 (핵심요약 또는 3분요약)."""
     from . import shorts
 
     runs = summary_runs(marker, cfg, transcript, wav)
     total = sum(e - s for s, e in runs)
 
     cfg.ensure_dirs()
-    out = cfg.export_dir / f"{safe_stem(marker, '_3분요약')}.mp4"
+    out = cfg.export_dir / f"{safe_stem(marker, '_' + summary_tag(marker))}.mp4"
 
     ranges = [(s, e, "summary") for s, e in runs]
     srt_text = build_srt(ranges, [e - s for s, e in runs], transcript)
 
     verse = _guess_verse(transcript, marker)
+    voice = voice_audio(marker, cfg, src)
+    say_audio_steps(cfg, voice)
     shorts.build(Path(src), runs, out, cfg,
-                 title=marker.sermon_title or "", verse=verse, srt_text=srt_text)
+                 title=marker.sermon_title or "", verse=verse, srt_text=srt_text,
+                 audio_src=voice, level_wav=wav)
 
     return {
         "video": out,
@@ -212,13 +252,11 @@ def export_summary_mp3(marker: Marker, cfg: Config, src: Path,
     total = sum(e - s for s, e in runs)
 
     cfg.ensure_dirs()
-    out = cfg.export_dir / f"{safe_stem(marker, '_3분요약')}.mp3"
+    out = cfg.export_dir / f"{safe_stem(marker, '_' + summary_tag(marker))}.mp3"
 
     print(f"{total:.0f}초를 소리만 뽑습니다 (mp3) — 조각 {len(runs)}개")
-    if cfg.denoise:
-        print(f"  잡음 제거: {'약하게' if cfg.denoise == 'light' else '강하게'}")
-    if cfg.normalize_audio:
-        print(f"  소리 크기를 방송 표준({cfg.target_lufs:.0f} LUFS)에 맞춥니다")
+    voice = voice_audio(marker, cfg, src)
+    say_audio_steps(cfg, voice)
 
     title = marker.sermon_title or marker.title
     cut_mod.extract_mp3(
@@ -227,8 +265,10 @@ def export_summary_mp3(marker: Marker, cfg: Config, src: Path,
         mono=getattr(cfg, "mp3_mono", True),
         normalize=cfg.normalize_audio, denoise=cfg.denoise,
         lufs=cfg.target_lufs, peak=cfg.target_peak_db,
+        speech=bool(getattr(cfg, "enhance_speech", False)), audio_src=voice,
         tags={
-            "title": f"{title} (3분 요약)" if title else "설교 3분 요약",
+            "title": (f"{title} ({summary_tag(marker)})" if title
+                      else f"설교 {summary_tag(marker)}"),
             "album": "창의진교회 설교 요약",
             "artist": "창의진교회",
             "date": (marker.upload_date or "")[:4],
@@ -345,10 +385,8 @@ def export_mp3(marker: Marker, cfg: Config, src: Path,
     total = sum(e - s for s, e in ranges)
     print(f"{total / 60:.0f}분을 소리만 뽑습니다 (mp3)"
           if total >= 60 else f"{total:.0f}초를 소리만 뽑습니다 (mp3)")
-    if cfg.denoise:
-        print(f"  잡음 제거: {'약하게' if cfg.denoise == 'light' else '강하게'}")
-    if cfg.normalize_audio:
-        print(f"  소리 크기를 방송 표준({cfg.target_lufs:.0f} LUFS)에 맞춥니다")
+    voice = voice_audio(marker, cfg, src)
+    say_audio_steps(cfg, voice)
 
     cut_mod.extract_mp3(
         Path(src), ranges, out,
@@ -356,6 +394,7 @@ def export_mp3(marker: Marker, cfg: Config, src: Path,
         mono=getattr(cfg, "mp3_mono", True),
         normalize=cfg.normalize_audio, denoise=cfg.denoise,
         lufs=cfg.target_lufs, peak=cfg.target_peak_db,
+        speech=bool(getattr(cfg, "enhance_speech", False)), audio_src=voice,
         tags={
             "title": marker.sermon_title or marker.title,
             "album": "창의진교회 설교",
@@ -402,16 +441,15 @@ def export_local(marker: Marker, cfg: Config, src: Path,
         print(f"{len(plain)}개 구간을 {'정확히(재인코딩)' if reencode else '빠르게(스트림복사)'} 자릅니다")
         if burn_srt:
             print("  자막을 화면에 태웁니다. 자르기와 한 번에 인코딩합니다 (화면을 다시 그리므로 오래 걸립니다)")
-        if cfg.denoise:
-            print(f"  잡음 제거: {'약하게' if cfg.denoise == 'light' else '강하게'}")
-        if cfg.normalize_audio:
-            print(f"  소리 크기를 방송 표준({cfg.target_lufs:.0f} LUFS)에 맞춥니다")
+        voice = voice_audio(marker, cfg, src)
+        say_audio_steps(cfg, voice)
         cut_mod.cut(Path(src), plain, final, reencode=reencode,
                     normalize=cfg.normalize_audio, denoise=cfg.denoise,
                     lufs=cfg.target_lufs, peak=cfg.target_peak_db,
                     crf=getattr(cfg, "video_crf", cut_mod.VIDEO_CRF),
                     preset=getattr(cfg, "video_preset", cut_mod.VIDEO_PRESET),
-                    burn_srt=burn_srt, font=cfg.subtitle_font, size=cfg.subtitle_size)
+                    burn_srt=burn_srt, font=cfg.subtitle_font, size=cfg.subtitle_size,
+                    speech=bool(getattr(cfg, "enhance_speech", False)), audio_src=voice)
 
     result: dict[str, Path] = {"video": final}
     lead = _add_intro(final, cfg, result)

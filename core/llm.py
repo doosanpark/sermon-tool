@@ -26,7 +26,9 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
-from .util import PROJECT_ROOT, ToolError, find_tool, tool_env
+from . import machine
+from .util import (PROJECT_ROOT, ToolError, find_in_dirs, find_tool,
+                   model_search_dirs, tool_env)
 
 SERVER_EXE = "llama-server"
 READY_TIMEOUT = 90.0        # 2GB 모델을 CPU 로 올리는 데 걸리는 시간
@@ -49,12 +51,46 @@ def find_server() -> str | None:
     return find_tool(SERVER_EXE)          # PATH 에 깔아 두신 분도 있다
 
 
+def model_dirs(cfg) -> list[Path]:
+    """모델을 찾아볼 곳들. 맨 앞이 받아서 넣는 곳이다."""
+    return model_search_dirs(cfg.work_dir, "llm")
+
+
 def model_dir(cfg) -> Path:
-    return Path(cfg.work_dir) / "models" / "llm"
+    """받아서 넣을 곳."""
+    return model_dirs(cfg)[0]
+
+
+def _tuned_name(cfg) -> str:
+    return getattr(cfg, "llm_tuned_file", "sermon-qwen3-4b-Q4_K_M.gguf")
+
+
+def tuned_path(cfg) -> Path:
+    """이 교회 설교로 학습시킨 모델 자리 (tools/train_llm.py 가 만든다).
+
+    여러 곳을 찾아보고, 아무 데도 없으면 받아서 넣을 자리를 돌려준다.
+    """
+    found = find_in_dirs(model_dirs(cfg), _tuned_name(cfg))
+    return found if found else model_dir(cfg) / _tuned_name(cfg)
+
+
+def is_tuned(cfg) -> bool:
+    return find_in_dirs(model_dirs(cfg), _tuned_name(cfg)) is not None
 
 
 def model_path(cfg) -> Path:
-    return model_dir(cfg) / cfg.llm_model_file
+    r"""쓸 모델. 학습시킨 모델이 있으면 그것, 없으면 기본 모델.
+
+    소스 폴더에 넣어 둔 모델도 찾는다. 빌드본의 작업 폴더는
+    %LOCALAPPDATA%\SermonTool\data 라서, 한 곳만 보면 모델이 PC 안에
+    멀쩡히 있는데도 "아직 없음" 이 떴다 (2026-10-20).
+    """
+    dirs = model_dirs(cfg)
+    found = find_in_dirs(dirs, _tuned_name(cfg))
+    if found:
+        return found
+    found = find_in_dirs(dirs, cfg.llm_model_file)
+    return found if found else dirs[0] / cfg.llm_model_file
 
 
 def is_ready(cfg) -> bool:
@@ -132,24 +168,34 @@ class Server:
         self.proc = None
 
 
-def start(cfg, progress=None) -> Server:
-    """llama-server 를 띄운다. cfg.llm_url 이 있으면 그걸 그대로 쓴다."""
+def start(cfg, progress=None, model: Path | None = None) -> Server:
+    """llama-server 를 띄운다. cfg.llm_url 이 있으면 그걸 그대로 쓴다.
+
+    model 을 주면 그 파일을 올린다 (학습 전·후를 견줄 때 tools/train_llm.py 가 쓴다).
+    """
     say = progress or (lambda t: print(f"  {t}"))
-    if getattr(cfg, "llm_url", ""):
+    if getattr(cfg, "llm_url", "") and model is None:
         return Server(url=cfg.llm_url.rstrip("/"))
 
     exe = find_server()
     if not exe:
         raise ToolError(why_not(cfg))
-    model = model_path(cfg)
+    model = Path(model) if model is not None else model_path(cfg)
     if not model.exists():
         raise ToolError(why_not(cfg))
 
     port = _free_port()
+    # 메모리에 맞춰 크기를 정한다. llama-server 는 context 길이만큼 KV 칸을
+    # 미리 잡으므로, 빠듯한 PC 에서는 이걸 줄이는 게 가장 크게 듣는다.
+    ctx, why = machine.llm_context_for(int(cfg.llm_context))
+    threads = machine.llm_threads_for(int(cfg.llm_threads))
+    if why:
+        say(why)
     cmd = [exe, "-m", str(model), "--host", "127.0.0.1", "--port", str(port),
-           "-c", str(cfg.llm_context), "-t", str(cfg.llm_threads),
+           "-c", str(ctx), "-t", str(threads),
            "--no-webui", "-ngl", "0"]
-    say(f"AI 모델을 올립니다 ({model.name}) — 처음 한 번 시간이 걸립니다")
+    say(f"AI 모델을 올립니다 ({model.name}{' — 이 교회 설교로 학습한 모델' if model == tuned_path(cfg) else ''})"
+        " — 처음 한 번 시간이 걸립니다")
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                             env=tool_env(),
                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))

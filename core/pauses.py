@@ -129,12 +129,23 @@ def snap_start(t: float, pauses: list[Pause], limit: float = 3.0,
 
 def snap_end(t: float, pauses: list[Pause], limit: float = 3.0,
              tail: float = 0.30) -> float:
-    """끝 시각을 **뒤쪽** 쉼으로 민다. 말이 끝나고 tail 만큼 여운을 둔다."""
+    """끝 시각을 **뒤쪽** 쉼으로 민다. 말이 끝나고 tail 만큼 여운을 둔다.
+
+    끝 자리는 **소리로 찾은 쉼**을 믿는다. 자막(t)의 끝 시각은 믿지 않는다.
+    받아쓰기가 매기는 끝 시각은 다음 말이 시작되는 데까지 늘어져서, 실측에서
+    0.5~0.7초씩 늦게 찍혔다 (2026-10-20: 말은 328.02초에 끝났는데 자막은
+    328.68초라 했고, 그 328.70초가 실은 다음 말이 시작하는 자리였다).
+    그래서 t 를 끝으로 삼으면 다음 말의 첫 소리를 물고 들어간다.
+
+    여운은 그 쉼 안에서만 준다 (2026-10-20: "문장 끝음이 자연스럽지 않다").
+    쉼이 짧으면 여운도 그만큼만 줘서 다음 말을 건드리지 않는다.
+    """
     after = [p for p in pauses if p.start >= t - 0.5 and p.start <= t + limit]
     if not after:
         return t + tail
     best = min(after, key=lambda p: p.start)
-    return best.start + tail
+    room = max(0.05, best.end - best.start - 0.05)  # 다음 말이 시작되기 전까지
+    return best.start + min(tail, room)
 
 
 def snap_span(start: float, end: float, pauses: list[Pause],

@@ -9,12 +9,14 @@
 """
 from __future__ import annotations
 
+import re
 import shutil
 import tempfile
 from pathlib import Path
 
-from .util import (ToolError, ffprobe_duration, has_audio, require, run,
-                    run_stream)
+from .util import (ToolError, ffprobe_duration, has_audio, is_memory_error,
+                   require, run, run_stream)
+from . import machine
 
 
 def _esc(path: Path) -> str:
@@ -26,6 +28,35 @@ DENOISE_FILTERS = {
     "light": "highpass=f=80,afftdn=nf=-25",        # -72.2dB · 목소리 손상 거의 없음
     "strong": "highpass=f=80,afftdn=nf=-35:nr=20",  # -78.3dB · 잡음이 심할 때
 }
+
+# 목소리 또렷하게 (FilmCraft 의 Enhance Speech 를 ffmpeg 필터로 옮긴 것).
+# 80Hz 아래 자르기 → 250Hz 뭉침 -3dB → 2.5kHz 발음대 +4dB → 10kHz 공기감 +2dB
+# → 말 사이 소음 누르기(게이트) → 여린 말 끌어올리기(압축).
+# 실측(2026-09-06 설교 21:45 1분): 발음대와 저음의 균형이 6dB 발음대 쪽으로 옮겨지고
+# 음절 리듬 선명도 0.373 → 0.382. 소리 크기는 loudnorm 이 맞추므로 둘을 견줄 때
+# 커져서 좋게 들리는 착각이 없다.
+# 말 사이 소음을 누르는 게이트(agate)는 **문턱을 낮추고 천천히 닫아야** 한다.
+#
+# 2026-10-20, "문장 끝음이 자연스럽지가 않아" 를 쫓아가 보니 여기였다.
+# 예전 값은 threshold=0.00316(-50dB) · release=30ms 였다. 예배당 울림의 꼬리가
+# 딱 -45~-60dB 라서, 말이 끝나자마자 게이트가 30밀리초 만에 닫히며 꼬리를
+# -18dB 깎았다. 실측(9월 6일 설교 328.05초): 게이트가 없으면 -29 → -54dB 로
+# 자연스럽게 잦아드는 소리가, 예전 값에서는 20밀리초 만에 -80dB 로 떨어졌다.
+#
+# **닫는 시간만** 고치면 된다. 처음에는 문턱과 깊이까지 함께 낮췄는데
+# (threshold=0.001 · range=0.25), 그러면 말 사이 소리 바닥이 10dB 올라가고
+# (-86dB → -77dB) 뒤에 있는 압축기가 그 바닥을 들었다 놨다 해서 소리가
+# 줄었다 늘었다 한다. 실측 출렁임 11.6dB → 17.9dB (2026-10-20 사용자 지적).
+#
+# 그래서 문턱(-50dB)과 깊이(-18dB)는 원래대로 두고 닫는 시간만 30ms → 400ms
+# 로 늘렸다. 재어 보면 꼬리 모양은 게이트를 끈 것과 같고, 말 사이 바닥은
+# -86dB 로 원래만큼 조용하며, 출렁임도 원래대로 11.6dB 다.
+SPEECH_FILTER = ("highpass=f=80,"
+                 "equalizer=f=250:t=q:w=1:g=-3,"
+                 "equalizer=f=2500:t=q:w=1:g=4,"
+                 "highshelf=f=10000:g=2,"
+                 "agate=threshold=0.00316:ratio=3:range=0.126:attack=10:release=400,"
+                 "acompressor=threshold=0.063:ratio=3:knee=6:attack=3:release=120:makeup=1.41")
 
 
 # 다시 인코딩할 때의 기본 화질. 설정(core/config.py 의 video_crf · video_preset)이
@@ -51,18 +82,142 @@ def sub_style(font: str = "Malgun Gothic", size: int = 22) -> str:
             "MarginV=28,Alignment=2")
 
 
+def _ff_threads() -> str:
+    """ffmpeg 에 줄 스레드 수. 메모리가 적으면 줄인다 (core/machine.py)."""
+    from . import machine
+
+    return str(machine.ffmpeg_threads())
+
+
+_SRT_TIMES = re.compile(
+    r"(\d+):(\d+):(\d+)[,.](\d+)\s*-->\s*(\d+):(\d+):(\d+)[,.](\d+)")
+
+
+def _srt_stamp(sec: float) -> str:
+    sec = max(0.0, sec)
+    h, rem = divmod(sec, 3600)
+    m, s = divmod(rem, 60)
+    ms = int(round((s - int(s)) * 1000))
+    return f"{int(h):02d}:{int(m):02d}:{int(s):02d},{ms:03d}"
+
+
+def shift_srt(srt_text: str, start: float, end: float) -> str:
+    """[start, end) 구간에 걸친 자막만 남기고 시각을 0 기준으로 당긴다.
+
+    영상을 쪼개어 만들 때 쓴다. 자막 시각은 이어붙인 타임라인 기준이므로,
+    세 번째 조각에 태울 자막은 그 조각이 시작하는 시각만큼 당겨 줘야 한다.
+    걸쳐 있는 자막은 조각 안쪽으로 잘라 맞춘다.
+    """
+    out, n = [], 0
+    for block in re.split(r"\n\s*\n", (srt_text or "").strip()):
+        rows = [r for r in block.splitlines() if r.strip()]
+        if len(rows) < 2:
+            continue
+        hit = None
+        for i, row in enumerate(rows):
+            m = _SRT_TIMES.search(row)
+            if m:
+                hit = (i, m)
+                break
+        if hit is None:
+            continue
+        i, m = hit
+        g = m.groups()
+
+        def sec(h, mi, se, ms):
+            return int(h) * 3600 + int(mi) * 60 + int(se) + int(ms.ljust(3, "0")[:3]) / 1000.0
+
+        s0, e0 = sec(*g[:4]), sec(*g[4:])
+        if e0 <= start or s0 >= end:
+            continue
+        n += 1
+        text = "\n".join(rows[i + 1:]) or " "
+        out.append(f"{n}\n{_srt_stamp(max(s0, start) - start)} --> "
+                   f"{_srt_stamp(min(e0, end) - start)}\n{text}")
+    return "\n\n".join(out) + ("\n" if out else "")
+
+
+def concat_copy(pieces: list[Path], out_path: Path, audio_filter: str = "") -> Path:
+    """만들어 둔 조각들을 이어붙인다. 화면은 그대로 복사하므로 화질이 안 깎인다.
+
+    소리는 다시 묶는다. 두 가지 까닭이 있다. AAC 는 조각 경계마다 아주 짧은
+    빈틈이 생길 수 있어 복사만 하면 '툭' 소리로 들린다. 그리고 음량 맞추기를
+    여기서 **한 번에** 걸어야 문장끼리 크기 차이가 살아 있다
+    (audio_chain_split 설명 참고). 소리를 다시 묶는 비용은 작다.
+    """
+    out_path = Path(out_path)
+    with tempfile.TemporaryDirectory() as tmp:
+        lst = Path(tmp) / "list.txt"
+        lst.write_text("".join(f"file '{p.resolve().as_posix()}'\n" for p in pieces),
+                       encoding="utf-8")
+        run_stream([
+            require("ffmpeg"), "-y", "-hide_banner", "-loglevel", "error", "-stats",
+            "-f", "concat", "-safe", "0", "-i", str(lst),
+            "-c:v", "copy",
+            *(["-af", audio_filter] if audio_filter else []),
+            "-c:a", "aac", "-b:a", "192k",
+            "-movflags", "+faststart", str(out_path.resolve()),
+        ], tag="[이어붙이기] ")
+    return out_path
+
+
+def _x264(preset: str) -> list[str]:
+    """메모리에 맞춘 x264 설정 묶음. 넉넉하면 부른 대로 그대로 돌려준다.
+
+    스레드만 줄여서는 모자랐다 (2026-10-20: 더 쓸 수 있는 양 0.5GB 에서 실패).
+    preset 을 내리고 앞 내다보기까지 줄여야 한다.
+    """
+    return ["-threads", _ff_threads(), *_x264_tail(preset)]
+
+
+def _x264_tail(preset: str) -> list[str]:
+    """스레드를 뺀 나머지 x264 설정. 조각별로 스레드를 달리 줄 때 쓴다."""
+    from . import machine
+
+    pick, why = machine.x264_preset(preset)
+    if why:
+        print(f"  [영상] {why}", flush=True)
+    return ["-preset", pick, *machine.x264_extra()]
+
+
 def audio_chain(denoise: str = "", normalize: bool = True,
-                lufs: float = -16.0, peak: float = -1.5) -> str:
-    """잡음 제거 → 음량 맞추기 순서로 필터를 잇는다.
+                lufs: float = -16.0, peak: float = -1.5, speech: bool = False) -> str:
+    """목소리 또렷하게 → 잡음 제거 → 음량 맞추기 순서로 필터를 잇는다.
 
     순서가 중요하다. 잡음을 먼저 지워야 음량을 키울 때 잡음까지 커지지 않는다.
+    목소리 다듬기를 그보다 먼저 하는 이유는, 눌러 둔 잡음을 EQ 로 다시 끌어올리지
+    않기 위해서다. 울림 줄이기는 ffmpeg 가 못 하므로 이 체인 **앞에서** 따로 한다
+    (core/voicefx.py 의 voice_wav).
     """
     parts = []
-    if denoise in DENOISE_FILTERS:
+    if speech:
+        parts.append(SPEECH_FILTER)
+        if denoise == "strong":
+            parts.append("afftdn=nf=-35:nr=20")
+        elif denoise == "light":
+            parts.append("afftdn=nf=-25")        # 하이패스는 SPEECH_FILTER 에 이미 있다
+    elif denoise in DENOISE_FILTERS:
         parts.append(DENOISE_FILTERS[denoise])
     if normalize:
         parts.append(loudnorm_filter(lufs, peak))
     return ",".join(parts)
+
+
+def audio_chain_split(denoise: str = "", normalize: bool = True,
+                      lufs: float = -16.0, peak: float = -1.5,
+                      speech: bool = False) -> tuple[str, str]:
+    """(조각마다 걸 필터, 다 이어붙인 뒤 한 번만 걸 필터).
+
+    음량 맞추기(loudnorm)는 **전체를 재어** 목표 음량에 맞추는 필터다. 조각마다
+    따로 걸면 문장 하나하나가 같은 크기로 눌려, 목사님이 힘주어 말한 대목과
+    낮춰 말한 대목의 차이가 뭉개진다. 실측(2026-10-20): 통째로 걸면 -18.1 LUFS
+    인 조용한 문장이, 조각마다 걸면 -15.8 로 끌어올려졌다.
+
+    그래서 소리 다듬기(또렷하게·잡음 줄이기)는 조각마다 걸고, 음량 맞추기만
+    이어붙인 뒤 한 번 건다.
+    """
+    local = audio_chain(denoise, False, lufs, peak, speech)
+    return local, (loudnorm_filter(lufs, peak) if normalize else "")
 
 
 def loudnorm_filter(lufs: float = -16.0, peak: float = -1.5) -> str:
@@ -78,8 +233,13 @@ def cut_reencode(src: Path, ranges: list[tuple[float, float]], out_path: Path,
                  crf: int = VIDEO_CRF, preset: str = VIDEO_PRESET,
                  normalize: bool = True, lufs: float = -16.0, peak: float = -1.5,
                  denoise: str = "", burn_srt: Path | None = None,
-                 font: str = "Malgun Gothic", size: int = 22) -> Path:
+                 font: str = "Malgun Gothic", size: int = 22,
+                 speech: bool = False, audio_src: Path | None = None) -> Path:
     """정확한 컷. 한 번의 ffmpeg 호출로 trim + concat 을 끝낸다.
+
+    audio_src 를 주면 화면은 src 에서, 소리는 그 파일에서 가져온다. 울림을 미리
+    줄여 둔 wav(core/voicefx.voice_wav)를 쓰는 길이다 — 원본과 같은 타임라인이므로
+    atrim 시각이 그대로 맞는다.
 
     burn_srt 를 주면 자막까지 같은 호출에서 태운다. 자른 뒤 따로 태우면 화면을
     두 번 인코딩해 손실이 두 번 쌓이고(실측 SSIM 0.9948 → 0.9928) 시간도 두 배다.
@@ -88,42 +248,106 @@ def cut_reencode(src: Path, ranges: list[tuple[float, float]], out_path: Path,
     if not ranges:
         raise ToolError("자를 구간이 없습니다.")
 
-    parts = []
-    labels = []
-    for i, (start, end) in enumerate(ranges):
-        parts.append(
-            f"[0:v]trim=start={start:.3f}:end={end:.3f},setpts=PTS-STARTPTS[v{i}];"
-            f"[0:a]atrim=start={start:.3f}:end={end:.3f},asetpts=PTS-STARTPTS[a{i}]"
-        )
-        labels.append(f"[v{i}][a{i}]")
+    # 몇 분 돌다 "Cannot allocate memory" 로 터지는 것보다, 시작 전에
+    # 사정을 말해 주는 쪽이 낫다 (2026-10-20).
+    _p = video_params(src)
+    _ok, _note = machine.export_check(_p["width"], _p["height"], len(ranges))
+    if _note:
+        for _line in _note.split("\n"):
+            print(("  [메모리] " if _line else "") + _line, flush=True)
+    if not _ok:
+        raise ToolError(_note)
 
-    vlabel = "[vraw]" if burn_srt else "[v]"
-    graph = (";".join(parts) + ";" + "".join(labels)
-             + f"concat=n={len(ranges)}:v=1:a=1{vlabel}[araw]")
+    asrc = "1:a" if audio_src else "0:a"
+    # 소리 다듬기는 조각마다, 음량 맞추기는 이어붙인 뒤 한 번만 (audio_chain_split).
+    chain, final_af = audio_chain_split(denoise, normalize, lufs, peak, speech)
 
-    # 잡음 제거·음량 맞추기를 여기서 같이 태운다. 예전에는 인자만 받고 쓰지
-    # 않아서, [정확히 자르기] 를 켜면 소리가 원본 그대로 나갔다.
-    chain = audio_chain(denoise, normalize, lufs, peak)
-    graph += f";[araw]{chain}[a]" if chain else ";[araw]anull[a]"
+    def _graph(group: list[tuple[float, float]], subs: str) -> str:
+        """그 묶음만 잘라 이어붙이는 필터 그래프."""
+        parts, labels = [], []
+        for i, (start, end) in enumerate(group):
+            parts.append(
+                f"[0:v]trim=start={start:.3f}:end={end:.3f},setpts=PTS-STARTPTS[v{i}];"
+                f"[{asrc}]atrim=start={start:.3f}:end={end:.3f},asetpts=PTS-STARTPTS[a{i}]"
+            )
+            labels.append(f"[v{i}][a{i}]")
+        vlabel = "[vraw]" if subs else "[v]"
+        g = (";".join(parts) + ";" + "".join(labels)
+             + f"concat=n={len(group)}:v=1:a=1{vlabel}[araw]")
+        # 잡음 제거·음량 맞추기를 여기서 같이 태운다. 예전에는 인자만 받고 쓰지
+        # 않아서, [정확히 자르기] 를 켜면 소리가 원본 그대로 나갔다.
+        g += f";[araw]{chain}[a]" if chain else ";[araw]anull[a]"
+        if subs:
+            g += f";[vraw]subtitles={subs}:force_style='{sub_style(font, size)}'[v]"
+        return g
+
+    # 메모리가 빠듯하면 **화질을 깎는 대신 조각을 나눠** 여러 번 만들고
+    # 마지막에 이어붙인다 (2026-10-20 사용자 뜻). ffmpeg 은 조각마다 원본에서
+    # 따로 잘라내는 가지를 동시에 들고 있어서, 조각 수가 메모리를 가장 크게 민다.
+    per = machine.batch_runs(len(ranges))
+    groups = [ranges[i:i + per] for i in range(0, len(ranges), per)]
+    srt_text = Path(burn_srt).read_text(encoding="utf-8") if burn_srt else ""
+    if len(groups) > 1:
+        print(f"  메모리를 아끼려고 조각 {len(ranges)}개를 {per}개씩 "
+              f"{len(groups)}번에 나눠 만듭니다 — 화질은 그대로입니다", flush=True)
 
     # 윈도우 절대경로를 필터 안에 넣으면 콜론과 역슬래시가 문법으로 읽혀 깨진다.
-    # 자막 파일을 임시 폴더에 복사해 두고 작업 폴더를 거기로 옮겨 이름만 넘긴다.
+    # 자막 파일을 임시 폴더에 두고 작업 폴더를 거기로 옮겨 이름만 넘긴다.
+    inputs = ["-i", str(Path(src).resolve())]
+    if audio_src:
+        inputs += ["-i", str(Path(audio_src).resolve())]
+    threads = int(_ff_threads())
+
     with tempfile.TemporaryDirectory() as tmp:
-        cwd = None
-        if burn_srt:
-            shutil.copyfile(burn_srt, Path(tmp) / "sub.srt")
-            graph += f";[vraw]subtitles=sub.srt:force_style='{sub_style(font, size)}'[v]"
-            cwd = tmp
-        run_stream([
-            require("ffmpeg"), "-y", "-hide_banner", "-loglevel", "error", "-stats",
-            "-i", str(Path(src).resolve()),
-            "-filter_complex", graph,
-            "-map", "[v]", "-map", "[a]",
-            "-c:v", "libx264", "-preset", preset, "-crf", str(crf),
-            "-c:a", "aac", "-b:a", "192k",
-            "-movflags", "+faststart",
-            str(Path(out_path).resolve()),
-        ], tag="[ffmpeg] ", total=sum(e - s for s, e in ranges), cwd=cwd)
+        tmpdir = Path(tmp)
+        pieces: list[Path] = []
+        at = 0.0                       # 이어붙인 타임라인에서 이 묶음이 시작하는 시각
+        for gi, group in enumerate(groups):
+            span = sum(e - s for s, e in group)
+            subs = ""
+            if srt_text.strip():
+                part = shift_srt(srt_text, at, at + span)
+                if part.strip():
+                    subs = f"sub{gi}.srt"
+                    (tmpdir / subs).write_text(part, encoding="utf-8")
+            graph = _graph(group, subs)
+            name = f"piece{gi:03d}.mp4" if len(groups) > 1 else "out.mp4"
+            tag = f"[ffmpeg {gi + 1}/{len(groups)}] " if len(groups) > 1 else "[ffmpeg] "
+
+            def _encode(th: int) -> None:
+                run_stream([
+                    require("ffmpeg"), "-y", "-hide_banner", "-loglevel", "error", "-stats",
+                    *inputs,
+                    "-filter_complex_threads", str(th),
+                    "-filter_complex", graph,
+                    "-map", "[v]", "-map", "[a]",
+                    "-c:v", "libx264", "-threads", str(th),
+                    *_x264_tail(preset), "-crf", str(crf),
+                    "-c:a", "aac", "-b:a", "192k",
+                    "-movflags", "+faststart", name,
+                ], tag=tag, total=span, cwd=tmpdir)
+
+            try:
+                _encode(threads)
+            except ToolError as exc:
+                # 메모리로 넘어졌으면 스레드만 1개로 줄여 그 묶음만 다시 해 본다.
+                # 화질 설정은 그대로 둔다 — 조각마다 달라지면 이어붙일 때 어긋난다.
+                if threads <= 1 or not is_memory_error(exc):
+                    raise
+                print("  메모리가 모자라 이 묶음만 스레드 1개로 다시 합니다", flush=True)
+                _encode(1)
+
+            pieces.append(tmpdir / name)
+            at += span
+
+        if len(pieces) > 1:
+            print(f"  만든 {len(pieces)}묶음을 이어붙이고 음량을 맞춥니다 — "
+                  "화면은 그대로 복사하므로 화질이 깎이지 않습니다", flush=True)
+            concat_copy(pieces, Path(out_path), audio_filter=final_af)
+        elif final_af:
+            concat_copy([pieces[0]], Path(out_path), audio_filter=final_af)
+        else:
+            shutil.copyfile(pieces[0], Path(out_path))
     return out_path
 
 
@@ -177,7 +401,7 @@ def _match_format(src: Path, params: dict, out_path: Path,
                 "-shortest"]
     cmd += [
         "-vf", vf,
-        "-c:v", "libx264", "-preset", preset, "-crf", str(crf),
+        "-c:v", "libx264", *_x264(preset), "-crf", str(crf),
         "-c:a", "aac", "-b:a", "192k",
         "-ar", str(params["sample_rate"]), "-ac", str(params["channels"]),
         "-movflags", "+faststart", str(out_path),
@@ -217,7 +441,7 @@ def prepend_intro(video: Path, intro: Path) -> float:
                                str(merged)], tag="[ffmpeg] ")
         except ToolError:
             print("  빠른 이어붙이기가 안 돼 다시 인코딩합니다 (조금 걸립니다)")
-            run_stream(base + ["-c:v", "libx264", "-preset", VIDEO_PRESET,
+            run_stream(base + ["-c:v", "libx264", *_x264(VIDEO_PRESET),
                                "-crf", str(VIDEO_CRF),
                                "-c:a", "aac", "-b:a", "192k",
                                "-movflags", "+faststart", str(merged)],
@@ -230,8 +454,11 @@ def prepend_intro(video: Path, intro: Path) -> float:
 def extract_mp3(src: Path, ranges: list[tuple[float, float]], out_path: Path,
                 bitrate: str = "96k", mono: bool = True,
                 normalize: bool = True, lufs: float = -16.0, peak: float = -1.5,
-                denoise: str = "", tags: dict[str, str] | None = None) -> Path:
+                denoise: str = "", tags: dict[str, str] | None = None,
+                speech: bool = False, audio_src: Path | None = None) -> Path:
     """구간을 이어붙여 소리만 mp3 로 뽑는다.
+
+    audio_src 를 주면 그 파일에서 소리를 가져온다 (울림을 미리 줄여 둔 wav).
 
     화면을 건드리지 않으므로 영상 만들기보다 훨씬 빠르다 (40분 분량 1분 안쪽).
     설교는 말소리뿐이라 모노 96kbps 면 충분하고, 파일이 작아 휴대폰으로
@@ -239,7 +466,7 @@ def extract_mp3(src: Path, ranges: list[tuple[float, float]], out_path: Path,
     """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    src = Path(src)
+    src = Path(audio_src) if audio_src else Path(src)
     if not src.exists():
         raise ToolError(f"원본 파일이 없습니다: {src}")
     if not ranges:
@@ -257,7 +484,7 @@ def extract_mp3(src: Path, ranges: list[tuple[float, float]], out_path: Path,
     graph = ";".join(parts) + ";" + "".join(labels) + \
         f"concat=n={len(ranges)}:v=0:a=1[ac]"
 
-    chain = audio_chain(denoise, normalize, lufs, peak)
+    chain = audio_chain(denoise, normalize, lufs, peak, speech)
     if chain:
         graph += f";[ac]{chain}[aout]"
         out_label = "[aout]"
@@ -283,7 +510,8 @@ def extract_mp3(src: Path, ranges: list[tuple[float, float]], out_path: Path,
 
 
 def clean_audio_in_place(path: Path, lufs: float = -16.0, peak: float = -1.5,
-                         denoise: str = "", normalize: bool = True) -> Path:
+                         denoise: str = "", normalize: bool = True,
+                         speech: bool = False) -> Path:
     """이미 만들어진 파일의 소리만 손본다 (잡음 제거·음량 맞추기).
 
     영상은 그대로 복사하고 소리만 다시 인코딩하므로 40분 분량도 1분 안쪽이다.
@@ -297,7 +525,7 @@ def clean_audio_in_place(path: Path, lufs: float = -16.0, peak: float = -1.5,
     run_stream([
         ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-stats",
         "-i", str(path),
-        "-af", audio_chain(denoise, normalize, lufs, peak),
+        "-af", audio_chain(denoise, normalize, lufs, peak, speech),
         "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
         "-movflags", "+faststart", str(tmp),
     ], tag="[ffmpeg] ", total=total)
@@ -384,7 +612,7 @@ def burn_subtitles(video: Path, srt: Path, font: str = "Malgun Gothic",
     run_stream([
         ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-stats",
         "-i", video.name, "-vf", vf,
-        "-c:v", "libx264", "-preset", preset, "-crf", str(crf),
+        "-c:v", "libx264", *_x264(preset), "-crf", str(crf),
         "-c:a", "copy", "-movflags", "+faststart", tmp.name,
     ], tag="[ffmpeg] ", total=total, cwd=video.parent)
     video.unlink()
@@ -397,7 +625,8 @@ def cut(src: Path, ranges: list[tuple[float, float]], out_path: Path,
         lufs: float = -16.0, peak: float = -1.5, denoise: str = "",
         crf: int = VIDEO_CRF, preset: str = VIDEO_PRESET,
         burn_srt: Path | None = None,
-        font: str = "Malgun Gothic", size: int = 22) -> Path:
+        font: str = "Malgun Gothic", size: int = 22,
+        speech: bool = False, audio_src: Path | None = None) -> Path:
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if out_path.exists():
@@ -412,6 +641,11 @@ def cut(src: Path, ranges: list[tuple[float, float]], out_path: Path,
             f"길이가 0에 가까운 구간이 있습니다: {bad}\n"
             "실수로 뭉개진 구간입니다. GUI 에서 Ctrl+Z 나 [AI가 찾은 구간으로] 를 눌러 되돌리세요.")
 
+    # 소리를 다른 파일에서 가져오려면(울림 줄인 wav) 소리를 다시 인코딩해야 한다
+    if audio_src is not None and not reencode:
+        print("  울림을 줄인 소리를 쓰므로 정확한 컷(재인코딩)으로 전환합니다")
+        reencode = True
+
     # 스트림 복사는 키프레임 단위라 몇 초짜리 구간에서는 빈 파일이 나온다
     if not reencode and any(e - s < 10.0 for s, e in ranges):
         print("  10초 미만 구간이 있어 정확한 컷(재인코딩)으로 전환합니다")
@@ -425,17 +659,20 @@ def cut(src: Path, ranges: list[tuple[float, float]], out_path: Path,
     if reencode:
         return cut_reencode(src, ranges, out_path, crf=crf, preset=preset,
                             normalize=normalize, lufs=lufs, peak=peak,
-                            denoise=denoise, burn_srt=burn_srt, font=font, size=size)
+                            denoise=denoise, burn_srt=burn_srt, font=font, size=size,
+                            speech=speech, audio_src=audio_src)
 
     cut_copy(src, ranges, out_path)
-    if normalize or denoise:
+    if normalize or denoise or speech:
         what = []
+        if speech:
+            what.append("목소리 또렷하게")
         if denoise:
             what.append("잡음 제거")
         if normalize:
             what.append("소리 크기 맞추기")
         print(f"  {' + '.join(what)} 중 (영상은 그대로, 소리만 다시 인코딩)")
-        clean_audio_in_place(out_path, lufs, peak, denoise, normalize)
+        clean_audio_in_place(out_path, lufs, peak, denoise, normalize, speech)
     return out_path
 
 

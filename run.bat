@@ -5,10 +5,11 @@ cd /d "%~dp0"
 rem ---- Use the project venv (.venv). Create it on first run with a final-release Python. ----
 rem ---- Messages are ASCII on purpose: cmd.exe reads .bat files in the OEM code page,   ----
 rem ---- so UTF-8 Korean here would show up garbled.                                       ----
+rem ---- No parentheses inside echo lines in if-blocks: cmd ends the block at the first ")". ----
 set "PY=.venv\Scripts\python.exe"
 if exist "%PY%" goto check
 
-echo .venv not found. Creating it (first time only, takes a few minutes)...
+echo .venv not found. Creating it - first time only, takes a few minutes...
 set MADE=
 for %%V in (3.11 3.12 3.13) do (
   if not defined MADE (
@@ -23,26 +24,29 @@ if not exist "%PY%" (
   pause
   exit /b 1
 )
+goto install
+
+:check
+rem ---- A venv can exist but be half-empty if an earlier install was cut off. ----
+"%PY%" -c "import PySide6, numpy, sherpa_onnx, yt_dlp" >nul 2>&1
+if not errorlevel 1 goto run
+echo Some packages are missing. Installing them now...
+
 :install
-"%PY%" -m pip install -q --upgrade pip
-echo Installing packages from requirements.txt. Download is about 500MB, so this can take 5-10 minutes.
-echo Progress is shown below. Do not close this window.
+echo.
+echo Installing packages. This takes 3 to 10 minutes the first time.
+echo Lines keep scrolling while it works - please wait.
+echo.
+"%PY%" -m pip install --upgrade pip
 "%PY%" -m pip install -r requirements.txt
 if errorlevel 1 (
-  echo Package install failed. Check the internet connection.
+  echo.
+  echo Package install failed. Check the internet connection and run again.
   pause
   exit /b 1
 )
-goto run
-
-:check
-rem ---- .venv may exist without the packages (e.g. made only for PyInstaller). ----
-rem ---- If any required package is missing, install requirements.txt now.      ----
-"%PY%" -c "import PySide6, numpy, sherpa_onnx, yt_dlp" >nul 2>&1
-if errorlevel 1 (
-  echo Some packages are missing in .venv. Installing them - first time only, takes a few minutes...
-  goto install
-)
+echo.
+echo Packages are ready.
 
 :run
 "%PY%" app.py

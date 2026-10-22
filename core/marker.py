@@ -57,6 +57,8 @@ class Marker:
     # 자리가 달라져 인덱스가 어긋난다. 시각은 그래도 거의 그대로다.
     summary_picks: list[float] = field(default_factory=list)
     summary_target: float = 180.0
+    # 요약을 어떤 형식으로 골랐는지 (three | one | sentences). 비어 있으면 예전 파일.
+    summary_format: str = ""
 
     # 메타
     pastor_speaker: str = ""

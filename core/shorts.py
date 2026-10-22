@@ -22,14 +22,20 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from .util import ToolError, ffprobe_duration, require, run_stream
+from .util import (ToolError, ffprobe_duration, is_memory_error,
+                   require, run_stream)
 from . import cut as cut_mod
+from . import levels, machine
 
 WIDTH, HEIGHT = 1080, 1920
 HEAD_H = 330                 # 제목 자리 높이
 VIDEO_H = 1140               # 영상 높이
 BG = "0x0E1513"              # 위아래 여백 색 — 짙은 무채색이 화면을 안 뺏는다
-FADE = 0.25                  # 조각 이음매의 소리 페이드(초)
+# 조각 이음매의 소리 페이드(초). 이음매의 '툭' 소리만 없애면 되므로 짧아야 한다.
+# 0.25 였을 때 말꼬리의 여운이 통째로 깎여 문장 끝이 부자연스러웠다
+# (2026-10-20). 구간 끝은 말이 끝나고 0.3초 뒤라, 0.25초를 깎으면 그 여운이
+# 거의 다 사라진다. 30밀리초면 '툭' 은 안 나고 여운은 그대로 남는다.
+FADE = 0.03
 
 # 한글이 나오는 굵은 글꼴. 앞에 있는 것부터 찾는다.
 FONT_CANDIDATES = [
@@ -73,7 +79,8 @@ def crop_rect(src_w: int, src_h: int, cx: float, cy: float, zoom: float
 def _compose_graph(runs: list[tuple[float, float]], w: int, h: int, x: int, y: int,
                    fps: float, audio_chain: str, denoise: str = "",
                    scaler: str = "", sharpen: float = 0.0,
-                   region: bool = False) -> str:
+                   region: bool = False, asrc: str = "0:a",
+                   gains: list[float] | None = None) -> str:
     """조각마다 잘라 세로로 맞추고 이어붙이는 필터 그래프.
 
     확대 화질: 720p 원본에서 350x370 쯤을 잘라 1080x1140 으로 약 3배 키운다.
@@ -100,9 +107,13 @@ def _compose_graph(runs: list[tuple[float, float]], w: int, h: int, x: int, y: i
             f"{vchain},"
             f"fps={fps:.3f},setsar=1[v{i}]"
         )
+        # 말소리 크기를 고르게 펴는 이득을 먼저 건다 (core/levels.py).
+        # 차이의 7할만 좁히므로 힘주어 말한 대목의 결은 남는다.
+        vol = levels.volume_filter(gains[i]) if gains and i < len(gains) else ""
         parts.append(
-            f"[0:a]atrim=start={start:.3f}:end={end:.3f},asetpts=PTS-STARTPTS,"
-            f"afade=t=in:st=0:d={FADE},afade=t=out:st={fo:.3f}:d={FADE}[a{i}]"
+            f"[{asrc}]atrim=start={start:.3f}:end={end:.3f},asetpts=PTS-STARTPTS,"
+            + (vol + "," if vol else "")
+            + f"afade=t=in:st=0:d={FADE},afade=t=out:st={fo:.3f}:d={FADE}[a{i}]"
         )
         labels.append(f"[v{i}][a{i}]")
 
@@ -192,7 +203,8 @@ def srt_to_ass(srt_text: str, font: str, size: int, margin_v: int = 205) -> str:
 
 def build(src: Path, runs: list[tuple[float, float]], out_path: Path, cfg,
           title: str = "", verse: str = "", srt_text: str = "",
-          region: Path | None = None) -> Path:
+          region: Path | None = None, audio_src: Path | None = None,
+          level_wav: Path | None = None) -> Path:
     """세로 요약 영상을 만든다. 조각 자르기·이어붙이기·자막을 한 번에 한다.
 
     region 은 선택이다. 원본과 시간이 맞는, 목사님 자리(crop_rect)만 미리 잘라
@@ -215,6 +227,15 @@ def build(src: Path, runs: list[tuple[float, float]], out_path: Path, cfg,
     if bad:
         raise ToolError(f"길이가 0에 가까운 구간이 있습니다: {bad[:3]}")
 
+    # 메모리를 먼저 본다. 몇 분 돌다 ffmpeg 가 "Cannot allocate memory" 로
+    # 터지는 것보다, 시작 전에 사정을 말해 주는 쪽이 낫다 (2026-10-20).
+    ok, note = machine.export_check(WIDTH, HEIGHT, len(runs))
+    if note:
+        for line in note.split("\n"):
+            print(("  [메모리] " if line else "") + line, flush=True)
+    if not ok:
+        raise ToolError(note)
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
     params = cut_mod.video_params(src)
     w, h, x, y = crop_rect(params["width"], params["height"],
@@ -228,8 +249,20 @@ def build(src: Path, runs: list[tuple[float, float]], out_path: Path, cfg,
     if not font:
         print("  한글 글꼴을 찾지 못해 제목 글자는 건너뜁니다")
 
-    chain = cut_mod.audio_chain(cfg.denoise, cfg.normalize_audio,
-                                cfg.target_lufs, cfg.target_peak_db)
+    # 말소리 크기를 재어 고르게 편다. 조각끼리는 물론 **조각 안에서도** 문장마다
+    # 잰다 — 한 조각(34초) 안에서 문장끼리 9.3dB 차이가 난 적이 있다
+    # (core/levels.py). 쉼 한가운데서 바뀌므로 바뀌는 순간은 들리지 않는다.
+    gains = levels.plan_gains(audio_src or level_wav, runs,
+                              say=lambda t: print(f"  {t}", flush=True))
+
+    # 소리 다듬기는 조각마다, 음량 맞추기는 이어붙인 뒤 한 번만 (cut.audio_chain_split).
+    chain, final_af = cut_mod.audio_chain_split(
+        cfg.denoise, cfg.normalize_audio, cfg.target_lufs, cfg.target_peak_db,
+        bool(getattr(cfg, "enhance_speech", False)))
+    # 소리를 어느 입력에서 가져오나. 입력 순서는 원본 → (조각) → (울림 줄인 wav).
+    asrc = "0:a"
+    if audio_src is not None:
+        asrc = f"{2 if region is not None else 1}:a"
 
     # ffmpeg 필터에 윈도우 절대경로를 넣으면 ':' 와 '\' 가 문법으로 읽혀 깨진다.
     # 작업 폴더를 임시 폴더로 옮기고 파일 이름만 넘긴다.
@@ -252,33 +285,91 @@ def build(src: Path, runs: list[tuple[float, float]], out_path: Path, cfg,
                                            (f"윤곽 되살리기 {sharpen:.1f}", sharpen > 0)) if on]
             if steps:
                 print("  확대 화질: " + " → ".join(steps))
-        graph = _compose_graph(runs, w, h, x, y, params["fps"], chain,
-                               denoise, scaler, sharpen, region=region is not None)
+        # 스레드마다 화면 버퍼를 잡고, 조각마다 원본을 따로 물고 있다. 메모리가
+        # 빠듯하면 **화질을 깎는 대신 조각을 나눠** 여러 번 만들고 이어붙인다
+        # (2026-10-20 사용자 뜻). 이어붙일 때는 화면을 그대로 복사한다.
+        _threads = machine.ffmpeg_threads()
+        _preset, _why = machine.x264_preset(cfg.shorts_preset)
+        if _why:
+            print(f"  [영상] {_why}", flush=True)
 
-        vf_extra = _title_filters(font, title, verse)
-        if srt_text.strip():
-            ass = srt_to_ass(srt_text, cfg.subtitle_font, cfg.shorts_sub_size)
-            (tmpdir / "sub.ass").write_text(ass, encoding="utf-8")
-            vf_extra += ",subtitles=sub.ass"
+        per = machine.batch_runs(len(runs))
+        groups = [runs[i:i + per] for i in range(0, len(runs), per)]
+        if len(groups) > 1:
+            print(f"  메모리를 아끼려고 조각 {len(runs)}개를 {per}개씩 "
+                  f"{len(groups)}번에 나눠 만듭니다 — 화질은 그대로입니다", flush=True)
 
-        if vf_extra:
-            graph = graph.replace("[vpad]", "[vp0]") + f";[vp0]{vf_extra.lstrip(',')}[vout]"
-            vmap = "[vout]"
-        else:
-            vmap = "[vpad]"
+        pieces: list[Path] = []
+        at = 0.0                           # 이어붙인 타임라인에서 이 묶음이 시작하는 시각
+        for gi, group in enumerate(groups):
+            at_run = sum(len(g) for g in groups[:gi])
+            graph = _compose_graph(group, w, h, x, y, params["fps"], chain,
+                                   denoise, scaler, sharpen,
+                                   region=region is not None, asrc=asrc,
+                                   gains=gains[at_run:at_run + len(group)])
+            span = sum(e - s for s, e in group)
+
+            vf_extra = _title_filters(font, title, verse)
+            if srt_text.strip():
+                # 자막 시각은 이어붙인 타임라인 기준이다. 이 묶음에 걸친 것만
+                # 남기고 묶음 시작 시각만큼 당긴다.
+                part = cut_mod.shift_srt(srt_text, at, at + span)
+                if part.strip():
+                    ass = srt_to_ass(part, cfg.subtitle_font, cfg.shorts_sub_size)
+                    (tmpdir / f"sub{gi}.ass").write_text(ass, encoding="utf-8")
+                    vf_extra += f",subtitles=sub{gi}.ass"
+
+            if vf_extra:
+                part_graph = (graph.replace("[vpad]", "[vp0]")
+                              + f";[vp0]{vf_extra.lstrip(',')}[vout]")
+                vmap = "[vout]"
+            else:
+                part_graph, vmap = graph, "[vpad]"
+
+            name = f"piece{gi:03d}.mp4" if len(groups) > 1 else "out.mp4"
+            tag = (f"[ffmpeg {gi + 1}/{len(groups)}] " if len(groups) > 1
+                   else "[ffmpeg] ")
+
+            def _encode(threads: int) -> None:
+                run_stream([
+                    require("ffmpeg"), "-y", "-hide_banner", "-loglevel", "error", "-stats",
+                    "-i", str(src.resolve()),
+                    *(["-i", str(region.resolve())] if region is not None else []),
+                    *(["-i", str(audio_src.resolve())] if audio_src is not None else []),
+                    "-filter_complex_threads", str(threads),
+                    "-filter_complex", part_graph,
+                    "-map", vmap, "-map", "[a]",
+                    "-threads", str(threads),
+                    "-c:v", "libx264", "-preset", _preset, "-crf", str(cfg.shorts_crf),
+                    *machine.x264_extra(),      # 빠듯하면 내다보기를 줄인다
+                    "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", "-b:a", "160k",
+                    "-movflags", "+faststart", name,
+                ], tag=tag, total=span, cwd=tmpdir)
+
+            try:
+                _encode(_threads)
+            except ToolError as exc:
+                # 메모리로 넘어졌으면 스레드만 1개로 줄여 그 묶음만 다시 해 본다.
+                # 화질 설정은 그대로 둔다 — 조각마다 달라지면 이어붙일 때 어긋난다.
+                if _threads <= 1 or not is_memory_error(exc):
+                    raise
+                print("  메모리가 모자라 이 묶음만 스레드 1개로 다시 합니다", flush=True)
+                _encode(1)
+
+            pieces.append(tmpdir / name)
+            at += span
 
         stage = tmpdir / "out.mp4"
-        run_stream([
-            require("ffmpeg"), "-y", "-hide_banner", "-loglevel", "error", "-stats",
-            "-i", str(src.resolve()),
-            *(["-i", str(region.resolve())] if region is not None else []),
-            "-filter_complex", graph,
-            "-map", vmap, "-map", "[a]",
-            "-c:v", "libx264", "-preset", cfg.shorts_preset, "-crf", str(cfg.shorts_crf),
-            "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "160k",
-            "-movflags", "+faststart", "out.mp4",
-        ], tag="[ffmpeg] ", total=total, cwd=tmpdir)
+        if len(pieces) > 1:
+            print(f"  만든 {len(pieces)}묶음을 이어붙이고 음량을 맞춥니다 — "
+                  "화면은 그대로 복사하므로 화질이 깎이지 않습니다", flush=True)
+            cut_mod.concat_copy(pieces, stage, audio_filter=final_af)
+        elif final_af:
+            # 한 묶음이면 조각 안에서 끝내지 않고 여기서 음량을 맞춘다.
+            one = tmpdir / "one.mp4"
+            stage.rename(one)
+            cut_mod.concat_copy([one], stage, audio_filter=final_af)
 
         # 지웠다 옮기지 않는다. 윈도우는 열려 있는 파일을 못 지우고(재생기에서
         # 보고 있으면 흔한 일이다), 지운 뒤 옮기다 실패하면 결과물이 사라진다.

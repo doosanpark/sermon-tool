@@ -154,21 +154,125 @@ def check_tools() -> dict[str, str | None]:
     return {n: find_tool(n) for n in ("yt-dlp", "ffmpeg", "ffprobe")}
 
 
+# 윈도우가 프로그램 하나 띄울 메모리조차 못 낼 때 나는 번호.
+#   1455 ERROR_COMMITMENT_LIMIT  "이 작업을 완료하기 위한 페이징 파일이 너무 작습니다"
+#   8    ERROR_NOT_ENOUGH_MEMORY
+_NO_MEMORY_WINERR = (1455, 8)
+
+
+def model_search_dirs(work_dir, *parts: str) -> list[Path]:
+    r"""모델을 찾아볼 곳들. 맨 앞이 **받아서 넣는 곳**이다.
+
+    왜 여러 곳을 보나 (2026-10-20):
+        빌드본은 쓰기 좋은 %LOCALAPPDATA%\SermonTool\data 를 작업 폴더로 쓴다.
+        그런데 2.5GB 짜리 모델은 소스 폴더(C:\hobby\sermon-tool\data)에
+        넣어 두는 일이 많다. 한 곳만 보면, 모델이 PC 안에 멀쩡히 있는데도
+        "아직 없음 → [모델 받기]" 가 뜬다. 실제로 그런 물음을 받았다.
+
+    그래서 작업 폴더 → exe 옆 → exe 위쪽 폴더들 → 소스 폴더 순으로 본다.
+    dist\SermonTool\SermonTool.exe 로 돌릴 때 두 단계 위가 소스 폴더다.
+    """
+    seen: list[Path] = []
+
+    def add(d: Path) -> None:
+        d = Path(d)
+        if d not in seen:
+            seen.append(d)
+
+    add(Path(work_dir) / "models" / Path(*parts))
+    bases = [EXE_DIR, *list(EXE_DIR.parents)[:3], PROJECT_ROOT]
+    for base in bases:
+        add(Path(base) / "data" / "models" / Path(*parts))
+        add(Path(base) / "models" / Path(*parts))
+    return seen
+
+
+def find_in_dirs(dirs: list[Path], name: str) -> Path | None:
+    """그 이름의 파일이 있는 첫 자리. 없으면 None."""
+    for d in dirs:
+        f = Path(d) / name
+        try:
+            if f.exists():
+                return f
+        except OSError:
+            continue
+    return None
+
+
+def is_memory_error(exc: BaseException) -> bool:
+    """메모리가 모자라서 난 오류인가. 라이브러리마다 말이 달라 글로 가린다.
+
+    ffmpeg 은 "Cannot allocate memory", x264 는 "malloc of size ... failed",
+    MKL 은 "mkl_malloc: failed to allocate memory" 라고 적는다. 윈도우가
+    프로그램을 못 띄울 때는 winerror 1455/8 로 온다.
+    """
+    if isinstance(exc, MemoryError):
+        return True
+    if getattr(exc, "winerror", None) in _NO_MEMORY_WINERR:
+        return True
+    text = f"{type(exc).__name__} {exc}".lower()
+    return any(word in text for word in
+               ("alloc", "out of memory", "bad_alloc", "메모리가 바닥"))
+
+
+def _machine_now() -> str:
+    """지금 메모리 형편 한 줄. 오류 글에 끼워 넣는다."""
+    try:
+        from . import machine
+
+        return machine.summary()
+    except Exception:
+        return "(알 수 없음)"
+
+
+def _no_memory_message(cmd: list[str]) -> str:
+    """메모리가 바닥나 프로그램을 못 띄울 때 보여 줄 글. 할 일을 적어 준다."""
+    from . import machine
+
+    have = machine.free_mb()
+    commit = machine.free_commit_mb()
+    now = []
+    if have is not None:
+        now.append(f"쓸 수 있는 메모리 {have:.0f}MB")
+    if commit is not None:
+        now.append(f"더 쓸 수 있는 양 {commit:.0f}MB")
+    return (
+        "컴퓨터 메모리가 바닥나 프로그램을 띄우지 못했습니다.\n"
+        + (f"  지금: {' · '.join(now)}\n" if now else "")
+        + f"  하려던 것: {Path(cmd[0]).name}\n\n"
+        "할 수 있는 일 (위에서부터 해 보세요):\n"
+        "  1. 웹 브라우저를 비롯해 다른 프로그램을 모두 닫고 다시 해 주세요.\n"
+        "  2. 컴퓨터를 다시 켠 뒤 이 프로그램만 열고 해 주세요.\n"
+        "  3. 가상 메모리를 늘려 주세요 — 시작 단추 옆에 '고급 시스템 설정' 을 치고,\n"
+        "     [고급] 탭 → [성능] [설정] → [고급] 탭 → [가상 메모리] [변경] 에서\n"
+        "     '자동으로 관리' 에 체크하거나 크기를 8GB 이상으로 잡으세요.\n"
+        "  4. 그래도 안 되면 메모리가 더 넉넉한 컴퓨터에서 써 주세요."
+    )
+
+
 def run(cmd: list[str]) -> str:
     """서브프로세스 실행. 실패 시 stderr를 그대로 담아 예외를 던진다."""
-    proc = subprocess.run(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        env=tool_env(),
-    )
+    try:
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=tool_env(),
+        )
+    except OSError as exc:
+        # 메모리가 모자라 프로세스를 못 띄운 것이면, 무슨 일인지 알아듣게 바꿔 준다.
+        # 그냥 두면 'WinError 1455' 같은 번호만 나와 무엇을 해야 할지 알 수 없다.
+        if getattr(exc, "winerror", None) in _NO_MEMORY_WINERR or exc.errno == 12:
+            raise ToolError(_no_memory_message(cmd)) from exc
+        raise
     if proc.returncode != 0:
         raise ToolError(
             f"명령 실패 (exit {proc.returncode})\n"
             f"  cmd: {' '.join(cmd)}\n"
+            f"  그때 이 컴퓨터: {_machine_now()}\n"
             f"  err: {(proc.stderr or '').strip()[-1500:]}"
         )
     return proc.stdout
@@ -185,7 +289,7 @@ def _mmss(sec: float) -> str:
 
 
 def tool_env() -> dict:
-    """bin\ 을 PATH 맨 앞에 얹은 환경.
+    """bin\\ 을 PATH 맨 앞에 얹은 환경.
 
     yt-dlp 는 JS 런타임(deno)을 PATH 에서 찾는다. 없으면 유튜브 포맷 목록이
     반쪽만 와서 "Requested format is not available" 이 난다.
@@ -296,7 +400,12 @@ def run_stream(cmd: list[str], tag: str = "", pct_step: float = 2.0,
 
     if proc.returncode != 0:
         tail = "\n".join(collected[-12:])
-        raise ToolError(f"명령 실패 (exit {proc.returncode})\n  cmd: {' '.join(cmd[:3])} ...\n{tail}")
+        # 메모리 숫자를 오류 글에 같이 적는다. 쓰시는 분이 오류를 그대로 붙여넣어
+        # 주시는 것만으로 그때의 형편을 알 수 있다 — 따로 여쭙지 않아도 된다
+        # (2026-10-20: 메모리 때문에 멈출 때마다 숫자를 물어보느라 하루를 썼다).
+        raise ToolError(f"명령 실패 (exit {proc.returncode})\n"
+                        f"  cmd: {' '.join(cmd[:3])} ...\n"
+                        f"  그때 이 컴퓨터: {_machine_now()}\n{tail}")
     return "\n".join(collected)
 
 

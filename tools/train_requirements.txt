@@ -1,0 +1,26 @@
+# 학습용 파이썬 환경(.venv-train) — 설교 편집기를 쓰는 데는 필요 없습니다.
+# torch 는 그래픽카드용 판을 따로 받으므로 여기 없습니다 (tools/train_setup.py 가 먼저 깝니다).
+#
+# 판을 박아 둔 것은 학습 코드(tools/train_llm.py)가 이 판들로 확인한 방식으로 쓰였기 때문입니다.
+# 마음대로 올리면 함수 이름이 바뀌어 학습이 멈출 수 있습니다.
+
+numpy>=1.24
+
+# --- 설교 모으기: 받기 · 자막 · 성문 ---
+yt-dlp
+faster-whisper==1.2.1
+ctranslate2>=4.6
+sherpa-onnx>=1.13
+# faster-whisper(ctranslate2) 가 그래픽카드를 쓰는 데 필요한 NVIDIA 라이브러리 (CUDA 12 · cuDNN 9)
+nvidia-cublas-cu12
+nvidia-cudnn-cu12
+nvidia-cuda-runtime-cu12
+
+# --- AI 학습 (LoRA) ---
+transformers==4.57.1
+peft==0.17.1
+accelerate==1.10.1
+huggingface_hub>=0.34,<1.0
+safetensors
+sentencepiece
+protobuf

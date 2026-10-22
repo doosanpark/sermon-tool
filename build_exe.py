@@ -117,7 +117,7 @@ def check_pyinstaller() -> None:
         raise SystemExit(1)
 
 
-def build(full: bool, console: bool, clean: bool) -> Path:
+def build(full: bool, console: bool, clean: bool, models: bool = True) -> Path:
     check_python()
     check_pyinstaller()
     sep = ";" if sys.platform == "win32" else ":"   # --add-data 구분자
@@ -218,6 +218,8 @@ def build(full: bool, console: bool, clean: bool) -> Path:
         raise SystemExit(proc.returncode)
 
     out = ROOT / "dist" / APP_NAME
+    if out.exists():
+        copy_models(out, with_models=models)
     print(f"\n완료: {out}")
     if out.exists():
         size = sum(f.stat().st_size for f in out.rglob("*") if f.is_file())
@@ -225,18 +227,137 @@ def build(full: bool, console: bool, clean: bool) -> Path:
     return out
 
 
+# ------------------------------------------------------- 사용자에게 함께 보낼 것
+def _mb(path: Path) -> float:
+    if path.is_dir():
+        return sum(f.stat().st_size for f in path.rglob("*") if f.is_file()) / 1e6
+    return path.stat().st_size / 1e6
+
+
+def _copy(src: Path, dst: Path) -> None:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if src.is_dir():
+        shutil.copytree(src, dst, dirs_exist_ok=True)
+    else:
+        shutil.copy2(src, dst)
+
+
+def copy_models(out: Path, with_models: bool = True) -> None:
+    r"""AI 모델을 exe 옆에 복사한다 — 받는 분이 따로 내려받지 않게.
+
+    왜 exe 옆(models\)인가:
+        프로그램은 모델을 작업 폴더 → exe 옆 → 그 위 폴더 → 소스 폴더 순으로
+        찾는다(core/util.model_search_dirs). exe 옆에 두면 설치본이든 폴더째
+        USB 로 건네든 그대로 찾아진다. _internal\ 안에 넣지 않는 이유는, 받는
+        분이 무엇이 들어 있는지 눈으로 볼 수 있어야 하기 때문이다.
+
+    무엇을 넣나:
+        - 뜻 보기 모델 (text-embed, 약 135MB)
+        - AI 모델 (gguf). 학습시킨 것이 있으면 **그것만** 넣는다. 둘 다 넣으면
+          5GB 가 되는데, 학습시킨 쪽이 있으면 기본 모델은 쓰이지 않는다.
+        - 고칠말.txt — 지금까지 모아 둔 오인식 사전. 받는 분이 처음부터
+          "니에미아 → 느헤미야" 같은 것을 다시 모으지 않아도 된다.
+    """
+    src = ROOT / "data" / "models"
+    print("\n=== 함께 보낼 것 ===")
+    sent = []
+    if not with_models:
+        # --no-models: AI 모델만 뺀다. 설명서·버전·고칠말은 그래도 들어간다 —
+        # 급히 시험하는 빌드에서도 어느 판인지는 알아야 한다.
+        print("  [뺌 ] AI 모델 (--no-models)")
+
+    # models\ 는 비어 있더라도 안내문 하나는 둔다. Inno Setup 은 컴파일할 때
+    # 폴더가 비어 있으면 "No files found" 로 실패한다.
+    mdir = out / "models"
+    mdir.mkdir(parents=True, exist_ok=True)
+    (mdir / "읽어보세요.txt").write_text(
+        "이 폴더에는 AI 모델이 들어 있습니다.\n\n"
+        "  text-embed\\  — 뜻이 가까운 문장을 찾는 모델 (약 135MB)\n"
+        "  llm\\         — 요약할 대목을 고르는 AI 모델 (약 2.5GB)\n\n"
+        "지우지 마세요. 지우면 [요약] 에서 AI 고르기를 쓸 수 없고,\n"
+        "프로그램이 인터넷에서 다시 내려받으려 합니다.\n",
+        encoding="utf-8-sig")
+
+    emb = src / "text-embed"
+    if not with_models:
+        pass
+    elif (emb / "model.onnx").exists():
+        _copy(emb, out / "models" / "text-embed")
+        sent.append(("뜻 보기 모델", _mb(emb)))
+    else:
+        print("  [없음] 뜻 보기 모델 — 받는 분이 처음 쓸 때 내려받게 됩니다")
+
+    llm = src / "llm"
+    tuned = sorted(llm.glob("sermon-*.gguf")) if llm.exists() else []
+    base = sorted(llm.glob("Qwen*.gguf")) if llm.exists() else []
+    pick = tuned[0] if tuned else (base[0] if base else None)
+    if not with_models:
+        pass
+    elif pick:
+        _copy(pick, out / "models" / "llm" / pick.name)
+        sent.append((f"AI 모델 {pick.name}"
+                     + (" (이 교회 설교로 학습한 모델)" if tuned else ""), _mb(pick)))
+    else:
+        print("  [없음] AI 모델 — [요약] 에서 AI 고르기를 쓰려면 받는 분이 내려받아야 합니다")
+
+    words = ROOT / "data" / "고칠말.txt"
+    if words.exists():
+        _copy(words, out / "고칠말.txt")
+        sent.append(("고칠말 사전", _mb(words)))
+
+    # 버전. 교회에 건넨 것이 어느 판인지 알 수 있게 적어 둔다 (core/version.py).
+    try:
+        sys.path.insert(0, str(ROOT))
+        from core import version as _v
+
+        (out / "버전.txt").write_text(
+            f"창의진교회 설교영상 편집기 {_v.full()}\n\n"
+            f"{_v.SUMMARY}\n\n"
+            "무엇이 안 되거나 이상하면 이 줄을 그대로 알려 주세요.\n",
+            encoding="utf-8-sig")
+        # 설치본도 같은 번호를 쓰게 한다 (installer.iss 가 이 파일을 읽는다)
+        (ROOT / "version.iss").write_text(
+            f'#define AppVersion "{_v.VERSION}"\n', encoding="utf-8")
+        sent.append((f"버전 {_v.full()}", 0.0))
+    except Exception as exc:
+        print(f"  [없음] 버전 — {exc}")
+
+    # 설명서. 받는 분이 두 번 눌러 바로 읽을 수 있게 exe 옆에 둔다.
+    docs = sorted((ROOT / "docs" / "배포").glob("*.html"))
+    for d in docs:
+        _copy(d, out / d.name)
+    if docs:
+        sent.append((f"설명서 {len(docs)}개 ({', '.join(d.stem for d in docs)})",
+                     sum(_mb(d) for d in docs)))
+    else:
+        print("  [없음] 설명서 — docs/배포/ 에 html 이 없습니다")
+
+    for name, mb in sent:
+        print(f"  [OK ] {name} — {mb:.0f}MB" if mb >= 1 else f"  [OK ] {name}")
+    tot = sum(m for _n, m in sent)
+    if tot >= 1:
+        much = f"{tot/1000:.1f}GB" if tot >= 1000 else f"{tot:.0f}MB"
+        print(f"  모두 {much} 가 더 들어갑니다")
+    if with_models and pick:
+        print(f"  받는 분은 따로 내려받을 것이 없습니다 — {out.name} 폴더째 건네셔도 됩니다")
+    else:
+        print("  AI 모델이 없는 꾸러미입니다 — 받는 분이 [요약] 에서 AI 를 쓰려면 모델을 내려받아야 합니다")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="SermonTool exe 빌드")
     ap.add_argument("--full", action="store_true", help="AI 분석 포함 (torch·pyannote·whisper)")
     ap.add_argument("--console", action="store_true", help="콘솔 창 표시 (디버깅용)")
     ap.add_argument("--clean", action="store_true", help="이전 빌드 캐시 삭제")
+    ap.add_argument("--no-models", action="store_true",
+                    help="AI 모델을 빼고 빌드 (프로그램만 급히 시험할 때)")
     args = ap.parse_args()
 
     if args.clean:
         for d in ("build", "dist"):
             shutil.rmtree(ROOT / d, ignore_errors=True)
 
-    build(args.full, args.console, args.clean)
+    build(args.full, args.console, args.clean, models=not args.no_models)
     print("\n설치본을 만들려면 Inno Setup 으로 installer.iss 를 컴파일하세요.")
     return 0
 

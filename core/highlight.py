@@ -42,7 +42,9 @@ Snap = Callable[[float, float], "tuple[float, float]"]
 # 성경 본문 특유의 어미. 목사님 해설에는 거의 안 나온다.
 _SCRIPTURE_TAIL = re.compile(
     r"(하나이다|하옵소서|하시옵소서|이니이다|나이다|하리라|하시니라|느니라"
-    r"|이로다|사오니|하였나니|이시여|할지라|지어다|되었더라|하더라|이라\s*하시)")
+    r"|이로다|사오니|하였나니|이시여|할지라|지어다|되었더라|하더라|이라\s*하시"
+    # 2026-09-06 설교(느헤미야 5장)에서 놓친 개역개정 어미
+    r"|하였으나|하였더니|하였느니라|하였으며|이르되|가로되|하니라|하였노라|하리이다|하였도다)")
 
 # 본문이 어디인지 알리는 말. 내용이 아니라 안내다.
 # 실측: "니에미아 1장 오늘 본문 5절부터 11절까지 말씀입니다" 가 되풀이되는
@@ -55,7 +57,9 @@ _ANNOUNCE = re.compile(
 # 봉독을 시키는 말. 이 뒤로 성경체 문장이 이어진다.
 _READ_CUE = re.compile(
     r"(읽겠습니다|읽습니다|봉독|다\s*같이|한\s*목소리로|같이\s*보실까요"
-    r"|제가\s*읽|구절은\s*다)")
+    r"|제가\s*읽|구절은\s*다"
+    # "제가 6절과 7절을 보겠습니다 같이 말씀을 봐주시기 바랍니다" — 이 뒤가 봉독이다
+    r"|\d+\s*절.{0,12}(보겠습니다|봅시다|보시겠습니다)|말씀을\s*봐\s*주시)")
 
 # 대목 선언. "첫 번째에요" 같은 말.
 _POINT = re.compile(r"(첫|두|세|네|다섯|여섯)\s*번째")
@@ -625,6 +629,11 @@ def make_helpers(cfg, log=None):
                 return _m.choose(_s, items, target)
 
             ask_llm.close = server.close      # 부르는 쪽이 끝나면 닫는다
+
+            def ask_raw(system, user, max_tokens=400, _s=server, _m=llm_mod):
+                return _m.ask(_s, system, user, max_tokens=max_tokens)
+
+            ask_llm.ask = ask_raw             # 덩어리 역할 매기기(blocks.label_with_ai)가 쓴다
             chooser = ask_llm
             notes.append("AI 고르기 켜짐")
         except Exception as exc:

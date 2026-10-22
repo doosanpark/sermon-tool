@@ -51,7 +51,7 @@ def main() -> int:
 
     win = appmod.MainWindow()
     names = [win.tabs.tabText(i) for i in range(win.tabs.count())]
-    assert any("3분 요약" in n for n in names), names
+    assert any("요약" in n for n in names), names
     print(f"창 OK      {win.windowTitle()}  ·  탭 {len(names)}개")
 
     cfg = win._config()

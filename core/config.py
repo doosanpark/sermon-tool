@@ -103,6 +103,15 @@ class Config:
     # 잡음 제거: "" (끔) / "light" / "strong"
     # 예배 방송의 웅웅거리는 정상 잡음(마이크 험·에어컨)에는 FFT 방식이 잘 듣는다.
     denoise: str = "light"
+    # --- 말소리 다듬기 (2026-10-19) ---
+    # FilmCraft(MIT/Apache-2.0) 의 Enhance Speech · DeReverb 를 옮긴 것.
+    # 예배당은 울려서 말꼬리가 뭉친다. ffmpeg 에는 울림 제거 필터가 없어 numpy 로
+    # 따로 처리한다(core/voicefx.py). 설교 영상·mp3·3분 요약에 모두 쓴다.
+    enhance_speech: bool = True       # 발음대 강조 + 말 사이 소음 누르기 (ffmpeg 필터)
+    # 0 이면 울림 줄이기를 끈다. 0.5 는 2026-10-19 에 전·후를 들어 보고 고른 값
+    # (0.8 은 더 세게 깎지만 사람 귀에 이득이 뚜렷하지 않았다).
+    dereverb_amount: float = 0.5
+    dereverb_rt60: float = 1.0        # 예배당의 울림 시간(초). 0.8~1.5 사이
     target_lufs: float = -16.0
     target_peak_db: float = -1.5
 
@@ -162,6 +171,9 @@ class Config:
     # 다른 모델을 쓰려면 이 두 줄만 바꾸면 된다. 한국어가 되는 4B 안팎이면 된다.
     llm_model_repo: str = "Qwen/Qwen3-4B-GGUF"
     llm_model_file: str = "Qwen3-4B-Q4_K_M.gguf"
+    # 이 교회 설교로 학습시킨 모델 (tools/train_llm.py 가 만든다). 이 파일이 models/llm 에
+    # 있으면 위의 기본 모델 대신 이걸 쓴다. 다른 PC 로 옮길 때는 이 파일만 복사하면 된다.
+    llm_tuned_file: str = "sermon-qwen3-4b-Q4_K_M.gguf"
     llm_context: int = 8192          # 후보만 넘기므로 이만하면 넉넉하다
     llm_threads: int = 4
     llm_url: str = ""                # 비워 두면 bin/llama-server 를 직접 띄운다

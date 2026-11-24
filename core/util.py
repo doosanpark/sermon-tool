@@ -250,8 +250,12 @@ def _no_memory_message(cmd: list[str]) -> str:
     )
 
 
-def run(cmd: list[str]) -> str:
-    """서브프로세스 실행. 실패 시 stderr를 그대로 담아 예외를 던진다."""
+def run(cmd: list[str], cwd: Path | str | None = None) -> str:
+    """서브프로세스 실행. 실패 시 stderr를 그대로 담아 예외를 던진다.
+
+    cwd 를 주면 그 폴더에서 돌린다. ffmpeg 필터에 파일 이름만 넘길 때 쓴다 — 윈도우
+    절대경로의 ':' 와 '\\' 는 필터 문법으로 읽혀 깨진다.
+    """
     try:
         proc = subprocess.run(
             cmd,
@@ -261,6 +265,7 @@ def run(cmd: list[str]) -> str:
             encoding="utf-8",
             errors="replace",
             env=tool_env(),
+            cwd=str(cwd) if cwd else None,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except OSError as exc:

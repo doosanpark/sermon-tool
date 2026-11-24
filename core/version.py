@@ -19,11 +19,12 @@ import datetime as _dt
 import sys
 from pathlib import Path
 
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 
 # 이 판에서 무엇이 달라졌는지 한 줄. 화면 도움말에 쓴다.
-SUMMARY = ("화면 새로 짬 · 핵심요약/3분요약 두 형식 · 이 교회 설교로 학습한 AI · "
-           "낮은 사양 PC 대응 · 모델과 설명서를 함께 배포")
+# 2.1: 소리만 있는 설교에 사진·영상을 입혀 영상 만들기 (배경 음악 자동 덕킹)
+SUMMARY = ("음성 설교에 사진·영상 입혀 영상 만들기 · 배경 음악 자동 덕킹 · "
+           "핵심요약/3분요약 두 형식 · 이 교회 설교로 학습한 AI · 낮은 사양 PC 대응")
 
 
 def build_stamp() -> str:

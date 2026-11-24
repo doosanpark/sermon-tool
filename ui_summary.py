@@ -213,12 +213,19 @@ class SummaryTab:
         self.btn_sum_mp3.setToolTip(
             "영상과 똑같은 구간을 소리만 뽑습니다.\n"
             "화면을 안 건드려서 몇 초면 끝나고, 파일이 작아 주고받기 좋습니다.")
+        # 모양(끌리는 제목·짧은 자막·로고)을 바꿔 만들고 싶으면 [숏폼 편집] 로 (2026-11-02).
+        # 이 줄의 [요약 영상 만들기] 는 예전 모양 그대로 만든다.
+        self.btn_sum_reels = QPushButton("숏폼 편집 →")
+        self.btn_sum_reels.setToolTip(
+            "고른 문장으로 세로 숏폼 모양(끌리는 제목·짧게 끊은 자막·로고·곤색 띠)을 꾸미고\n"
+            "소리와 함께 미리 본 뒤 만듭니다.")
+        self.btn_sum_reels.clicked.connect(lambda: self.tabs.setCurrentIndex(self.TAB_REELS))
         self.btn_sum_pick.clicked.connect(self.on_summary_pick)
         self.btn_sum_undo.clicked.connect(self.on_summary_undo)
         self.btn_sum_make.clicked.connect(self.on_summary_export)
         self.btn_sum_mp3.clicked.connect(self.on_summary_mp3)
         for b in (self.btn_sum_pick, self.btn_sum_undo,
-                  self.btn_sum_make, self.btn_sum_mp3):
+                  self.btn_sum_make, self.btn_sum_mp3, self.btn_sum_reels):
             b.setMinimumHeight(30)               # 좁은 화면에서도 글자가 잘리지 않게
             row.addWidget(b)
         row.addStretch(1)

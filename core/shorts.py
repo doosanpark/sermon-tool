@@ -56,14 +56,14 @@ def find_font() -> Path | None:
     return None
 
 
-def crop_rect(src_w: int, src_h: int, cx: float, cy: float, zoom: float
-              ) -> tuple[int, int, int, int]:
+def crop_rect(src_w: int, src_h: int, cx: float, cy: float, zoom: float,
+              area_h: int = VIDEO_H) -> tuple[int, int, int, int]:
     """비율로 적힌 크롭 자리를 실제 픽셀로 바꾼다.
 
     cx, cy 는 목사님이 계신 자리(0~1). zoom 은 원본 높이의 몇 배를 담을지로,
     작을수록 크게 잡힌다. 화면 밖으로 나가지 않게 안쪽으로 밀어 넣는다.
     """
-    aspect = WIDTH / VIDEO_H
+    aspect = WIDTH / area_h
     h = max(64, min(src_h, int(src_h * zoom)))
     w = int(round(h * aspect))
     if w > src_w:                      # 원본이 좁으면 높이를 줄여 맞춘다
@@ -76,11 +76,35 @@ def crop_rect(src_w: int, src_h: int, cx: float, cy: float, zoom: float
     return w, h, x, y
 
 
+def region_crop(src_w: int, src_h: int, region: tuple[int, int, int, int],
+                cx: float, cy: float, zoom: float, area_h: int) -> tuple[int, int, int, int]:
+    """원본의 한 부분(region) 안에서 자를 자리. 세로 영상·예전 요약 영상을 쓸 때.
+
+    zoom 은 region 높이의 몇 배를 담을지 (1 이면 region 을 다 담는다 — 비율이 다르면
+    남는 쪽을 잘라 낸다). cx·cy 는 region 안에서의 자리(0~1). 짝수 픽셀로 맞춘다.
+    """
+    rx, ry, rw, rh = (int(v) for v in region)
+    rw, rh = max(2, min(rw, src_w - rx)), max(2, min(rh, src_h - ry))
+    aspect = WIDTH / area_h
+    h = max(16, min(rh, int(rh * zoom)))
+    w = int(round(h * aspect))
+    if w > rw:
+        w = rw
+        h = int(round(w / aspect))
+    w, h = max(2, w // 2 * 2), max(2, h // 2 * 2)
+    x = int(round(rx + rw * cx - w / 2))
+    y = int(round(ry + rh * cy - h / 2))
+    x = max(rx, min(rx + rw - w, x))
+    y = max(ry, min(ry + rh - h, y))
+    return w, h, x, y
+
+
 def _compose_graph(runs: list[tuple[float, float]], w: int, h: int, x: int, y: int,
                    fps: float, audio_chain: str, denoise: str = "",
                    scaler: str = "", sharpen: float = 0.0,
                    region: bool = False, asrc: str = "0:a",
-                   gains: list[float] | None = None) -> str:
+                   gains: list[float] | None = None,
+                   area_y: int = HEAD_H, area_h: int = VIDEO_H) -> str:
     """조각마다 잘라 세로로 맞추고 이어붙이는 필터 그래프.
 
     확대 화질: 720p 원본에서 350x370 쯤을 잘라 1080x1140 으로 약 3배 키운다.
@@ -89,12 +113,12 @@ def _compose_graph(runs: list[tuple[float, float]], w: int, h: int, x: int, y: i
     싸다) → lanczos 로 키우고(윤곽 보존) → 키운 뒤 윤곽만 되살린다(cas).
     없는 디테일을 만들지는 못한다. 안경테·태블릿 모서리·나무결이 조금 사는 정도다.
     """
-    scale = f"scale={WIDTH}:{VIDEO_H}" + (f":flags={scaler}" if scaler else "")
+    scale = f"scale={WIDTH}:{area_h}" + (f":flags={scaler}" if scaler else "")
     post = f"cas={sharpen:.2f}" if sharpen > 0 else ""
     if region:
         # 두 번째 입력([1:v])이 이미 잘라 키워 둔 조각이다 (AI 초해상 등). 잡음 완화와
         # 선명화는 그쪽에서 끝났으므로 크기만 맞춘다. 소리는 여전히 원본([0:a])에서 온다.
-        vin, vchain = "[1:v]", f"scale={WIDTH}:{VIDEO_H}:flags=lanczos"
+        vin, vchain = "[1:v]", f"scale={WIDTH}:{area_h}:flags=lanczos"
     else:
         vin, vchain = "[0:v]", ",".join(
             p for p in (f"crop={w}:{h}:{x}:{y}", denoise, scale, post) if p)
@@ -119,7 +143,7 @@ def _compose_graph(runs: list[tuple[float, float]], w: int, h: int, x: int, y: i
 
     graph = ";".join(parts) + ";" + "".join(labels)
     graph += f"concat=n={len(runs)}:v=1:a=1[vc][araw]"
-    graph += (f";[vc]pad={WIDTH}:{HEIGHT}:0:{HEAD_H}:color={BG},"
+    graph += (f";[vc]pad={WIDTH}:{HEIGHT}:0:{area_y}:color={BG},"
               f"format=yuv420p[vpad]")
     graph += f";[araw]{audio_chain}[a]" if audio_chain else ";[araw]anull[a]"
     return graph
@@ -201,10 +225,26 @@ def srt_to_ass(srt_text: str, font: str, size: int, margin_v: int = 205) -> str:
     return head + "\n".join(lines) + "\n"
 
 
+def _blank_png(path: Path, w: int = WIDTH, h: int = HEIGHT) -> Path:
+    """투명한 빈 그림 (자막이 없는 동안 얹는다)."""
+    import struct
+    import zlib
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return (struct.pack(">I", len(data)) + kind + data
+                + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF))
+
+    raw = b"".join(b"\x00" + b"\x00" * (w * 4) for _ in range(h))
+    path.write_bytes(b"\x89PNG\r\n\x1a\n"
+                     + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0))
+                     + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b""))
+    return path
+
+
 def build(src: Path, runs: list[tuple[float, float]], out_path: Path, cfg,
           title: str = "", verse: str = "", srt_text: str = "",
           region: Path | None = None, audio_src: Path | None = None,
-          level_wav: Path | None = None) -> Path:
+          level_wav: Path | None = None, look: dict | None = None) -> Path:
     """세로 요약 영상을 만든다. 조각 자르기·이어붙이기·자막을 한 번에 한다.
 
     region 은 선택이다. 원본과 시간이 맞는, 목사님 자리(crop_rect)만 미리 잘라
@@ -212,6 +252,13 @@ def build(src: Path, runs: list[tuple[float, float]], out_path: Path, cfg,
     소리·구간·자막·제목은 그대로 원본 기준으로 처리한다. 교회 PC 에는 GPU 가
     없으므로 기본 경로에서는 쓰지 않는다. 실측(2026-09-15, RTX 4060 Ti):
     Real-ESRGAN x4plus 1.8fps, animevideov3 12fps, FlashVSR 0.05fps(8GB 로는 부족).
+
+    look 은 [숏폼 편집] 에서 정한 모양이다 (2026-11-02, ui_reels.py 가 만든다).
+        area      (위 y, 높이) — 영상이 놓일 자리. 꽉 채우기면 (0, 1920)
+        cx cy zoom  목사님 자리·크기
+        overlay   띠·제목·로고를 그린 투명 그림 (1080x1920 PNG) — 화면 내내 얹는다
+        captions  [(시작, 끝, 그림 PNG)] — 이어붙인 시간 기준의 짧은 자막 그림들
+    주면 title·verse·srt_text 대신 이 그림들을 얹는다. 주지 않으면 예전과 **똑같다**.
     """
     src, out_path = Path(src), Path(out_path)
     if not src.exists():
@@ -238,15 +285,29 @@ def build(src: Path, runs: list[tuple[float, float]], out_path: Path, cfg,
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     params = cut_mod.video_params(src)
-    w, h, x, y = crop_rect(params["width"], params["height"],
-                           cfg.shorts_center_x, cfg.shorts_center_y, cfg.shorts_zoom)
+    if look:
+        area_y, area_h = (int(v) for v in look.get("area", (HEAD_H, VIDEO_H)))
+        if look.get("region"):
+            # 세로 영상이나 예전 요약 영상 — 정한 부분 안에서 자른다
+            w, h, x, y = region_crop(params["width"], params["height"], look["region"],
+                                     float(look.get("cx", 0.5)), float(look.get("cy", 0.5)),
+                                     float(look.get("zoom", 1.0)), area_h)
+        else:
+            w, h, x, y = crop_rect(params["width"], params["height"],
+                                   float(look.get("cx", cfg.shorts_center_x)),
+                                   float(look.get("cy", cfg.shorts_center_y)),
+                                   float(look.get("zoom", cfg.shorts_zoom)), area_h)
+    else:
+        area_y, area_h = HEAD_H, VIDEO_H
+        w, h, x, y = crop_rect(params["width"], params["height"],
+                               cfg.shorts_center_x, cfg.shorts_center_y, cfg.shorts_zoom)
     total = sum(e - s for s, e in runs)
     print(f"세로 요약 영상을 만듭니다 — 조각 {len(runs)}개, {total:.0f}초")
     print(f"  원본 {params['width']}x{params['height']} 에서 {w}x{h} 를 잘라 "
           f"{WIDTH}x{HEIGHT} 로 만듭니다")
 
-    font = find_font()
-    if not font:
+    font = None if look else find_font()
+    if not font and not look:
         print("  한글 글꼴을 찾지 못해 제목 글자는 건너뜁니다")
 
     # 말소리 크기를 재어 고르게 편다. 조각끼리는 물론 **조각 안에서도** 문장마다
@@ -263,6 +324,8 @@ def build(src: Path, runs: list[tuple[float, float]], out_path: Path, cfg,
     asrc = "0:a"
     if audio_src is not None:
         asrc = f"{2 if region is not None else 1}:a"
+    # 모양 그림 입력은 그 뒤에 붙는다
+    n_in = 1 + (region is not None) + (audio_src is not None)
 
     # ffmpeg 필터에 윈도우 절대경로를 넣으면 ':' 와 '\' 가 문법으로 읽혀 깨진다.
     # 작업 폴더를 임시 폴더로 옮기고 파일 이름만 넘긴다.
@@ -272,6 +335,21 @@ def build(src: Path, runs: list[tuple[float, float]], out_path: Path, cfg,
             shutil.copyfile(font, tmpdir / "title.ttf")
             (tmpdir / "title.txt").write_text(title or "", encoding="utf-8")
             (tmpdir / "verse.txt").write_text(verse or "", encoding="utf-8")
+        cap_chunks: list[tuple[float, float, str]] = []
+        if look:
+            ov = look.get("overlay")
+            if ov:
+                shutil.copyfile(ov, tmpdir / "overlay.png")
+            for k, (a, b, png) in enumerate(look.get("captions") or []):
+                name = f"cap{k:04d}.png"
+                shutil.copyfile(png, tmpdir / name)
+                cap_chunks.append((float(a), float(b), name))
+            if cap_chunks:
+                _blank_png(tmpdir / "blank.png")
+            print(f"  모양: 영상 자리 {WIDTH}x{area_h}"
+                  + (" (꽉 채우기)" if area_h >= HEIGHT else "")
+                  + (" · 띠·제목·로고 그림" if ov else "")
+                  + (f" · 짧은 자막 {len(cap_chunks)}개" if cap_chunks else ""), flush=True)
 
         denoise = str(getattr(cfg, "shorts_denoise", "") or "")
         scaler = str(getattr(cfg, "shorts_scaler", "") or "")
@@ -306,11 +384,34 @@ def build(src: Path, runs: list[tuple[float, float]], out_path: Path, cfg,
             graph = _compose_graph(group, w, h, x, y, params["fps"], chain,
                                    denoise, scaler, sharpen,
                                    region=region is not None, asrc=asrc,
-                                   gains=gains[at_run:at_run + len(group)])
+                                   gains=gains[at_run:at_run + len(group)],
+                                   area_y=area_y, area_h=area_h)
             span = sum(e - s for s, e in group)
 
             vf_extra = _title_filters(font, title, verse)
-            if srt_text.strip():
+            look_inputs: list[str] = []
+            if look:
+                # 띠·제목·로고 그림을 내내 얹고, 짧은 자막 그림을 차례로 얹는다.
+                vf_extra = ""
+                chain_ = []
+                cur, k = "vp0", n_in
+                if (tmpdir / "overlay.png").exists():
+                    look_inputs += ["-loop", "1", "-framerate", f"{params['fps']:.3f}",
+                                    "-i", "overlay.png"]
+                    chain_.append(f"[{k}:v]format=rgba[ovl];"
+                                  f"[{cur}][ovl]overlay=0:0:shortest=1[vp1]")
+                    cur, k = "vp1", k + 1
+                if cap_chunks:
+                    from . import reels
+                    track = reels.caption_track(cap_chunks, at, at + span)
+                    reels.ffconcat([(n or "blank.png", d) for n, d in track], "blank.png",
+                                   tmpdir / f"caps{gi}.txt")
+                    look_inputs += ["-f", "concat", "-safe", "0", "-i", f"caps{gi}.txt"]
+                    chain_.append(f"[{k}:v]fps={params['fps']:.3f},format=rgba[cap];"
+                                  f"[{cur}][cap]overlay=0:0:eof_action=pass[vp2]")
+                    cur, k = "vp2", k + 1
+                look_graph = ";".join(chain_ + [f"[{cur}]format=yuv420p[vout]"])
+            if not look and srt_text.strip():
                 # 자막 시각은 이어붙인 타임라인 기준이다. 이 묶음에 걸친 것만
                 # 남기고 묶음 시작 시각만큼 당긴다.
                 part = cut_mod.shift_srt(srt_text, at, at + span)
@@ -319,7 +420,10 @@ def build(src: Path, runs: list[tuple[float, float]], out_path: Path, cfg,
                     (tmpdir / f"sub{gi}.ass").write_text(ass, encoding="utf-8")
                     vf_extra += f",subtitles=sub{gi}.ass"
 
-            if vf_extra:
+            if look:
+                part_graph = graph.replace("[vpad]", "[vp0]") + ";" + look_graph
+                vmap = "[vout]"
+            elif vf_extra:
                 part_graph = (graph.replace("[vpad]", "[vp0]")
                               + f";[vp0]{vf_extra.lstrip(',')}[vout]")
                 vmap = "[vout]"
@@ -336,6 +440,7 @@ def build(src: Path, runs: list[tuple[float, float]], out_path: Path, cfg,
                     "-i", str(src.resolve()),
                     *(["-i", str(region.resolve())] if region is not None else []),
                     *(["-i", str(audio_src.resolve())] if audio_src is not None else []),
+                    *look_inputs,
                     "-filter_complex_threads", str(threads),
                     "-filter_complex", part_graph,
                     "-map", vmap, "-map", "[a]",

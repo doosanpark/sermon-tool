@@ -13,6 +13,7 @@ import io
 import re
 import sys
 import textwrap
+import threading
 import time
 import traceback
 from pathlib import Path
@@ -45,6 +46,10 @@ from core.marker import Marker
 from core.refine import refine_benediction, refine_sermon
 from core.util import ToolError, ffprobe_duration, hms
 from ui_summary import SummaryTab
+import ui_reels
+import ui_visual
+from core import reels as reels_mod
+from core import visual as visual_mod
 
 LABEL_KO = {"sermon": "설교", "benediction": "축도", "clip": "구간"}
 
@@ -404,6 +409,8 @@ class ZoomBar(QWidget):
 
 # ----------------------------------------------------------------- 메인 창
 class MainWindow(SummaryTab, QWidget):
+    # 음성 설교 알아보기가 끝났다 (파일, 음성 설교인가, 까닭) — 뒤 스레드에서 보낸다
+    audio_detected = Signal(str, bool, str)
     # 3분 요약에서 문장을 무엇으로 고를지. 뒤로 갈수록 잘 고르고 느리다.
 
     def __init__(self):
@@ -423,6 +430,8 @@ class MainWindow(SummaryTab, QWidget):
         self._small_screen = False
         self.edit_edge = "start"
         self.intro_path = ""
+        self._audio_detect_for: Path | None = None
+        self.audio_detected.connect(self._on_audio_detected)
         self._last_seek = 0.0
         self._undo: list[list[dict]] = []
         self._drag_snapshot = False
@@ -528,8 +537,16 @@ class MainWindow(SummaryTab, QWidget):
     # 별도 모드로 두니 하는 일이 '로그 띄우기' 뿐이라 용도가 없었다.
     #
     # 진행 로그도 모드가 아니라 가끔 들여다보는 것이라 머리띠의 [기록] 단추로 옮겼다.
-    MODES = ("설교 찾기", "요약")
-    TAB_LOG = 2
+    #
+    # [음성 설교] 는 소리만 있는 설교를 영상으로 만들 때의 설정 칸이다 (2026-11-02).
+    # 처음에는 단추 하나로 여는 대화상자였는데, 덧붙인 기능처럼 보여 모드로 올렸다.
+    # 음성 설교로 보이는 파일을 열면 저절로 이 칸으로 온다 (_detect_audio_sermon).
+    #
+    # [숏폼 편집] 은 요약 영상(세로)의 모양을 고르고 미리 보는 칸이다 (2026-11-02).
+    MODES = ("설교 찾기", "요약", "숏폼 편집", "음성 설교")
+    TAB_REELS = 2
+    TAB_VISUAL = 3
+    TAB_LOG = 4
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -575,7 +592,7 @@ class MainWindow(SummaryTab, QWidget):
         # 패널로 감싼다 — 영상 칸에는 제목 띠를, 편집 칸에는 테두리만.
         # 편집 칸은 안에 [2. 설교 구간 정하기] 라는 제목이 이미 있어 띠를 또 올리면
         # 같은 말이 두 번 적힌다. 지금 만지고 있는 칸에는 파란 테두리가 생긴다.
-        middle = QSplitter(Qt.Horizontal)
+        middle = self._middle = QSplitter(Qt.Horizontal)
         middle.addWidget(ui_header.Panel("영상", player_scroll))
         middle.addWidget(ui_header.Panel(None, editor_scroll))
         middle.setSizes([880, 420])
@@ -592,6 +609,27 @@ class MainWindow(SummaryTab, QWidget):
         self.tabs.addTab(self.subtitle_list, "자막 고치기")
         self.summary_tab = self._build_summary_tab()
         self.tabs.addTab(self.summary_tab, "요약")
+        self.reels_tab = ui_reels.ReelsPanel(self._config)
+        self.tabs.addTab(self.reels_tab, "숏폼 편집")
+        self.reels_tab.make_clicked.connect(self.on_reels_export)
+        self.reels_tab.hook_edited.connect(self._on_reel_hook)
+        self.reels_tab.go_summary.connect(lambda: self.tabs.setCurrentIndex(1))
+        self.reels_tab.transcribe_requested.connect(self.on_reels_transcribe)
+        self.visual_tab = ui_visual.VisualPanel(self._config)
+        self.tabs.addTab(self.visual_tab, "음성 설교")
+        # 바쁠 때 잠그는 목록·guitest 가 이 이름으로 찾는다
+        self.btn_visual = self.visual_tab.btn_make
+        self.visual_tab.make_clicked.connect(self.on_export_visual)
+        self.visual_tab.title_edited.connect(self._on_visual_title)
+        self.visual_tab.verse_edited.connect(self._on_visual_verse)
+        self.visual_tab.changed.connect(self._save_visual_prefs)
+        self.visual_tab.items_changed.connect(self._on_visual_items)
+        self.visual_tab.range_requested.connect(lambda: self.tabs.setCurrentIndex(0))
+        self.sermon_title_edit.textChanged.connect(self.visual_tab.set_title)
+        self._visual_save_timer = QTimer(self)
+        self._visual_save_timer.setSingleShot(True)
+        self._visual_save_timer.setInterval(1200)
+        self._visual_save_timer.timeout.connect(self._save_marker_quiet)
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(5000)
@@ -646,13 +684,36 @@ class MainWindow(SummaryTab, QWidget):
             self.bottom_panel.set_title(self.tabs.tabText(_index))
         if not hasattr(self, "vsplit"):
             return
+        # [음성 설교] 는 편집기 하나가 칸 전체를 쓴다 (FilmCraft 의 작업 공간처럼).
+        # 위의 영상·구간 칸은 접어 둔다 — 구간은 [설교 찾기] 에서 정한다.
+        on_visual = self.tabs.currentWidget() is self.visual_tab
+        on_reels = self.tabs.currentWidget() is self.reels_tab
+        if on_reels:
+            self._sync_reels()
+        on_visual = on_visual or on_reels         # 둘 다 칸 전체를 쓰는 편집기
+        if hasattr(self, "_middle"):
+            if on_visual and self._middle.isVisible():
+                self.player.pause()
+                self.btn_play.setText("▶ 재생")
+                if not on_reels:
+                    self._sync_visual()
+            elif on_visual and not on_reels:
+                self._sync_visual()
+            self._middle.setVisible(not on_visual)
+            # 영상 가져오기 줄도 접는다 — 낮은 노트북 화면에서 타임라인 자리를 낸다
+            self.toolbar_box.setVisible(not on_visual)
+        if hasattr(self, "hint"):
+            self._update_hint()
+        if on_visual:
+            return
         on_summary = self.tabs.currentWidget() is self.summary_tab
         if on_summary and self._split_before_summary is None:
             self._split_before_summary = self.vsplit.sizes()
             self.fine_box.setVisible(False)
             self.video.setMinimumHeight(90)
             total = sum(self.vsplit.sizes())
-            want = min(max(360, int(total * 0.5)), total - 120)
+            least = 360
+            want = min(max(least, int(total * 0.5)), total - 120)
             if self.tabs.height() < want:
                 self.vsplit.setSizes([total - want, want])
         elif not on_summary and self._split_before_summary is not None:
@@ -908,11 +969,25 @@ class MainWindow(SummaryTab, QWidget):
             "중간의 찬양·헌금은 어느 쪽이든 빠집니다.")
         lay.addWidget(self.bene_check)
 
+        # 음성 설교 — 화면 없이 소리만 있는 설교 (2026-11-02). 파일을 열면 저절로
+        # 알아보고 켠다. 켜지면 [3.] 단추가 [음성 설교 영상 만들기] 로 바뀌어
+        # 아래 [음성 설교] 칸의 배경·글자·음악으로 영상을 만든다. 잘못 알아봤으면 끄면 된다.
+        self.audio_check = QCheckBox("음성 설교  (화면 없이 소리만 있는 설교)")
+        self.audio_check.setToolTip(
+            "켜면 [3.] 단추가 [음성 설교 영상 만들기] 로 바뀝니다.\n"
+            "설교 구간의 소리 위에 아래 [음성 설교] 칸에서 고른 사진·영상(없으면 짙은 곤색 바탕)과\n"
+            "제목·본문을 얹어 가로 영상(1920x1080)을 만듭니다. 썸네일과 설명 글도 함께 나옵니다.\n\n"
+            "영상을 열 때 제목에 '음성' 이 있거나 화면이 처음부터 끝까지 그대로면 저절로 켭니다.\n"
+            "잘못 켜졌으면 끄세요. 끄면 보통 설교 영상처럼 원래 화면 그대로 만듭니다.")
+        self.audio_check.toggled.connect(self._on_audio_toggled)
+        lay.addWidget(self.audio_check)
+
         make_row = QHBoxLayout()
         make_row.setSpacing(6)
         make_row.addWidget(self.btn_export, 3)
         make_row.addWidget(self.btn_mp3, 1)
         lay.addLayout(make_row)
+
 
         # ---------------- 고급 (평소엔 숨김) ----------------
         self.btn_advanced = QPushButton("고급 설정 보기  ▼")
@@ -1109,16 +1184,34 @@ class MainWindow(SummaryTab, QWidget):
             a.triggered.connect(fn)
             self.addAction(a)
 
-        act("I", lambda: self._mark("start"))
-        act("O", lambda: self._mark("end"))
-        act("Space", self.toggle_play)
-        act("K", self.toggle_play)
-        act("J", lambda: self._nudge_play(-10))
-        act("L", lambda: self._nudge_play(10))
-        act("Left", lambda: self._nudge_play(-1))
-        act("Right", lambda: self._nudge_play(1))
+        # [음성 설교] 편집기를 보고 있으면 같은 단축키가 편집기의 미리 보기·타임라인을 다룬다
+        def either(main, visual, reels=None):
+            def go():
+                if self._on_visual():
+                    visual()
+                elif self._on_reels():
+                    (reels or (lambda: None))()
+                else:
+                    main()
+            return go
+
+        rt = self.reels_tab
+        act("I", either(lambda: self._mark("start"), lambda: None))
+        act("O", either(lambda: self._mark("end"), lambda: None))
+        act("Space", either(self.toggle_play, self.visual_tab.toggle_play, rt.toggle_play))
+        act("K", either(self.toggle_play, self.visual_tab.toggle_play, rt.toggle_play))
+        act("J", either(lambda: self._nudge_play(-10), lambda: self.visual_tab.step(-10),
+                        lambda: rt.step(-10)))
+        act("L", either(lambda: self._nudge_play(10), lambda: self.visual_tab.step(10),
+                        lambda: rt.step(10)))
+        act("Left", either(lambda: self._nudge_play(-1), lambda: self.visual_tab.step(-1),
+                           lambda: rt.step(-1)))
+        act("Right", either(lambda: self._nudge_play(1), lambda: self.visual_tab.step(1),
+                            lambda: rt.step(1)))
         act("Ctrl+S", self.on_save)
-        act("Ctrl+Z", self.undo)
+        act("Ctrl+Z", either(self.undo, self.visual_tab.undo))
+        act("Ctrl+Y", either(lambda: None, self.visual_tab.redo))
+        act("Ctrl+Shift+Z", either(lambda: None, self.visual_tab.redo))
         act("Ctrl+Left", lambda: self._shift(self.edit_edge, -0.1))
         act("Ctrl+Right", lambda: self._shift(self.edit_edge, 0.1))
         act("Ctrl+Shift+Left", lambda: self._shift(self.edit_edge, -1.0))
@@ -1742,7 +1835,8 @@ class MainWindow(SummaryTab, QWidget):
         # 만드는 중에 구간을 바꿀 수 있었다 (2026-10-20 사용자 지적).
         # 부모를 잠가도 자식이 따로 꺼 둔 상태는 그대로 남으므로 안전하다.
         for box in (getattr(self, "toolbar_box", None), getattr(self, "editor_scroll", None),
-                    getattr(self, "summary_tab", None)):
+                    getattr(self, "summary_tab", None), getattr(self, "visual_tab", None),
+                    getattr(self, "reels_tab", None)):
             if box is not None:
                 box.setEnabled(not busy)
 
@@ -1751,7 +1845,8 @@ class MainWindow(SummaryTab, QWidget):
             # 일하는 중에 페이징 파일을 바꾸면 돌고 있는 ffmpeg 가 휘말린다
             self.btn_pagefile.setEnabled(not busy)
         for w in (self.btn_fetch, self.btn_open, self.btn_manual, self.btn_quick,
-                  self.btn_load, self.btn_export, self.btn_mp3, self.btn_save,
+                  self.btn_load, self.btn_export, self.btn_mp3, self.btn_visual,
+                  self.btn_save,
                   self.btn_undo, self.btn_restore_ai,
                   self.btn_start_here, self.btn_end_here,
                   self.btn_start_check, self.btn_end_check,
@@ -1831,6 +1926,7 @@ class MainWindow(SummaryTab, QWidget):
 
         self.intro_path = intro if intro and Path(intro).exists() else ""
         self._show_intro()
+        self._fill_visual_panel()
 
         self.subtitle_box.currentTextChanged.connect(self._save_prefs)
         self.denoise_box.currentTextChanged.connect(self._save_prefs)
@@ -1973,15 +2069,31 @@ class MainWindow(SummaryTab, QWidget):
         if hasattr(self, "header"):
             # 머리띠 가운데에는 지금 다루는 영상 이름을 적는다 (FilmCraft 와 같은 자리)
             self.header.set_title(self.media_path.name if self.media_path else "")
+        if self._on_reels():
+            self.hint.setText(
+                "왼쪽에서 모양 틀을 고르고, 끌리는 제목·자막·로고를 다듬으세요. 미리 보기의 "
+                "영상을 끌면 목사님 자리가 옮겨집니다.  ▶ 재생으로 보고 [이 모양으로 숏폼 만들기].")
+            return
+        if self._on_visual():
+            self.hint.setText(
+                "왼쪽 목록의 사진·영상을 타임라인으로 끌어 놓고, 장면을 눌러 길이·움직임·넘기기를 "
+                "고르세요.  ▶ 재생으로 소리와 함께 미리 보고 [음성 설교 영상 만들기].")
+            return
         if not self.media_path:
             self.hint.setText("먼저 유튜브 주소를 붙여넣고 [영상 가져오기]를 누르세요.")
         elif not self.marker or not self.marker.clips:
-            self.hint.setText(
-                "[직접 정하기]를 누른 뒤, 영상을 보면서 [여기가 시작] · [여기가 끝]을 누르세요.")
+            if self.audio_check.isChecked():
+                self.hint.setText(
+                    "음성 설교입니다 — 먼저 설교 구간을 정하세요 ([자동으로 찾기] 또는 [직접 정하기]). "
+                    "그다음 [3. 음성 설교 영상 만들기] 를 누르면 화면을 꾸미는 편집기가 열립니다.")
+            else:
+                self.hint.setText(
+                    "[직접 정하기]를 누른 뒤, 영상을 보면서 [여기가 시작] · [여기가 끝]을 누르세요.")
         else:
             self.hint.setText(
                 "◀ 0.1 / 0.1 ▶ 버튼으로 다듬고, [이 지점 확인]으로 들어본 뒤 "
-                "[설교 영상 만들기]를 누르세요.")
+                + ("[음성 설교 영상 만들기]를 누르세요." if self.audio_check.isChecked()
+                   else "[설교 영상 만들기]를 누르세요."))
 
     def _video_id(self, url: str) -> str:
         return fetch.info(url)["id"] if url.startswith("http") else url
@@ -2339,6 +2451,8 @@ class MainWindow(SummaryTab, QWidget):
     def _show_intro(self) -> None:
         name = Path(self.intro_path).name if self.intro_path else "없음"
         self.intro_label.setText(name if len(name) <= 28 else name[:26] + "…")
+        if hasattr(self, "visual_tab"):
+            self.visual_tab.set_intro(self.intro_path)
 
     def _ask_title(self) -> bool:
         """제목이 비었으면 한 번 물어본다. 계속해도 되면 True."""
@@ -2413,7 +2527,123 @@ class MainWindow(SummaryTab, QWidget):
                   next_step="[폴더 열기] 로 확인하세요",
                   est_kind="export", est_minutes=total / 60)
 
+    # -------- 음성 설교 영상 만들기 (소리만 있는 설교 → 영상) --------
+    def _visual_defaults(self) -> visual_mod.Options:
+        """[음성 설교] 칸에 채워 둘 값. 폴더·음악은 지난번 것을, 글자는 이 설교 것을."""
+        st = QSettings("창의진교회", "SermonTool")
+        verse = getattr(self.marker, "sermon_verse", "") if self.marker else ""
+        if not verse and self.marker and self.transcript:
+            try:
+                verse = export_mod._guess_verse(self.transcript, self.marker)
+            except Exception:           # 짐작은 덤이다 — 못 하면 빈칸으로 둔다
+                verse = ""
+        music = str(st.value("visual_music", "") or "")
+        return visual_mod.Options(
+            folder="",
+            photo_seconds=float(st.value("visual_seconds", visual_mod.PHOTO_SECONDS) or
+                                visual_mod.PHOTO_SECONDS),
+            fill=str(st.value("visual_fill", "repeat") or "repeat"),
+            title=self.sermon_title_edit.text().strip(),
+            verse=verse,
+            corner=st.value("visual_corner", True, type=bool),
+            music=music if st.value("visual_music_on", False, type=bool) else "",
+            music_level=str(st.value("visual_music_level", "low") or "low"),
+        )
+
+    def on_export_visual(self) -> None:
+        """음성 설교에 [음성 설교] 칸에서 고른 배경을 입혀 영상을 만든다 (core/visual.py)."""
+        if not self.marker or not self.marker.clips:
+            QMessageBox.information(
+                self, "구간을 먼저 정하세요",
+                "[자동으로 찾기] 를 누르거나 [여기가 시작]·[여기가 끝] 으로\n"
+                "설교 구간을 먼저 정해 주세요.")
+            return
+        src = self.media_path
+        if not src or not Path(src).exists():
+            QMessageBox.information(
+                self, "설교 소리가 필요합니다",
+                "설교 소리가 든 파일을 먼저 여세요.\n"
+                "[영상 가져오기] 에 유튜브 주소를 넣거나, [내 컴퓨터에서 열기] 로\n"
+                "mp3·m4a·wav·mp4 파일을 열면 됩니다.")
+            return
+        ranges = [(a, b) for a, b, _ in self.marker.ranges()]
+        total = sum(b - a for a, b in ranges)
+        if total < 5.0:
+            QMessageBox.information(
+                self, "구간이 너무 짧습니다",
+                f"설교 구간이 {total:.1f}초밖에 되지 않습니다.\n구간을 다시 확인해 주세요.")
+            return
+
+        trouble = self.visual_tab.problem()
+        if trouble:
+            self.tabs.setCurrentIndex(self.TAB_VISUAL)
+            QMessageBox.information(self, "배경 음악", trouble)
+            return
+        opts = self.visual_tab.options()
+        if not opts.title or not opts.verse:
+            missing = " · ".join(x for x, v in (("설교 제목", opts.title), ("본문", opts.verse))
+                                 if not v)
+            answer = QMessageBox.question(
+                self, f"{missing} 이 비어 있습니다",
+                f"{missing} 이 비어 있습니다. 화면에 비운 채로 나옵니다.\n\n"
+                "[Yes] 이대로 만들기   [No] 적고 오기",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if answer != QMessageBox.Yes:
+                self.tabs.setCurrentIndex(self.TAB_VISUAL)
+                (self.visual_tab.title_edit if not opts.title
+                 else self.visual_tab.verse_edit).setFocus()
+                return
+        self._save_visual_prefs()
+
+        # 고친 제목·본문은 이 설교의 작업에 남긴다 — 파일 이름·요약 영상도 이걸 쓴다.
+        self.sermon_title_edit.setText(opts.title)
+        self.marker.sermon_verse = opts.verse
+        self.on_save()
+        cfg = self._config()
+        marker = self.marker
+
+        def job():
+            return visual_mod.build(marker, cfg, Path(src), opts)
+
+        def done(result):
+            lines = "\n".join(f"{k}: {v}" for k, v in result.items())
+            self.log(lines)
+            box = QMessageBox(self)
+            box.setWindowTitle("영상 완료")
+            box.setText(lines + "\n\n올리실 곳(유튜브·인스타그램 등)에 영상을 올리고,\n"
+                        "썸네일과 설명 글은 같은 폴더의 파일을 쓰세요.")
+            open_btn = box.addButton("폴더 열기", QMessageBox.ActionRole)
+            box.addButton("닫기", QMessageBox.AcceptRole)
+            box.exec()
+            if box.clickedButton() is open_btn:
+                folder = Path(result["video"]).parent
+                QDesktopServices.openUrl(_QUrl.fromLocalFile(str(folder.resolve())))
+
+        photos = sum(1 for it in opts.items if it.get("kind") != "video")
+        videos = len(opts.items) - photos
+        self._run(job, done,
+                  title="음성 설교 영상 만들기",
+                  detail=(f"{total / 60:.0f}분   "
+                          + (f"타임라인 장면 {len(opts.items)}개 (사진 {photos} · 영상 {videos})"
+                             if opts.items else "배경 없이 곤색 바탕에 제목·본문")
+                          + ("   배경 음악" if opts.music else "")),
+                  done_message="영상을 만들었습니다",
+                  next_step="[폴더 열기] 로 확인하고 올리실 곳에 올리세요",
+                  est_kind="visual", est_minutes=total / 60)
+
     def on_export(self) -> None:
+        if self.audio_check.isChecked():
+            # 음성 설교 — [음성 설교] 편집기로 가서 화면을 꾸민 뒤 거기서 만든다
+            if not self.marker or not self.marker.clips:
+                QMessageBox.information(
+                    self, "구간을 먼저 정하세요",
+                    "[자동으로 찾기] 를 누르거나 [여기가 시작]·[여기가 끝] 으로\n"
+                    "설교 구간을 먼저 정해 주세요.")
+                return
+            self.tabs.setCurrentIndex(self.TAB_VISUAL)
+            self.log("[음성 설교] 편집기 — 타임라인에 사진·영상을 놓고 "
+                     "오른쪽 [음성 설교 영상 만들기] 를 누르세요 (비워 두면 곤색 바탕)")
+            return
         if not self.marker or not self.marker.clips:
             QMessageBox.information(
                 self, "구간을 먼저 정하세요",
@@ -2536,6 +2766,10 @@ class MainWindow(SummaryTab, QWidget):
         self.end_edit.clear()
         self.conf_label.setText("")
         self.sermon_title_edit.clear()
+        self.visual_tab.set_verse("")
+        self._audio_detect_for = None
+        self._set_audio_mode(False)
+        self._sync_visual(full=True)
         self.title_label.setText("영상 없음")
         self.range_bar.set_data(0.0, [], -1)
         self.zoom_bar.set_clip(0.0, 0.0)
@@ -2596,6 +2830,10 @@ class MainWindow(SummaryTab, QWidget):
 
         self._restore_summary(marker)
         self._refresh_clips(0)
+        self._fill_visual_panel()
+        self._sync_visual(full=True)
+        if marker.audio_sermon is not None:
+            self._set_audio_mode(bool(marker.audio_sermon))
 
         if not self.media_path:
             cfg = self._config()
@@ -2651,7 +2889,286 @@ class MainWindow(SummaryTab, QWidget):
         self.log(f"열기: {path.name}")
         if self.marker and not self.marker.duration:
             QTimer.singleShot(800, self._refresh_bar)
+        self._fill_visual_panel()
+        self._sync_visual(full=True)
+        self._detect_audio_sermon(self.media_path)
         self._update_hint()
+
+    # -------- 음성 설교 알아보기 --------
+    def _detect_audio_sermon(self, path: Path) -> None:
+        """연 파일이 음성 설교(화면 없이 소리만)인지 뒤에서 알아본다.
+
+        사람이 한 번 켜거나 끈 설교는 그 뜻을 따른다 (marker.audio_sermon).
+        화면을 몇 장 뽑아 비교하느라 3초쯤 걸려 창이 멈추지 않게 따로 돌린다.
+        """
+        if self.marker is not None and self.marker.audio_sermon is not None:
+            self._set_audio_mode(bool(self.marker.audio_sermon))
+            return
+        if getattr(self, "_audio_detect_for", None) == path:
+            return                       # 같은 파일을 두 번 열 때 (_apply_marker 와 겹침)
+        self._audio_detect_for = path
+        title = self.marker.title if self.marker else ""
+
+        def work():
+            try:
+                found, why = visual_mod.looks_audio_only(path, title)
+            except Exception:            # 짐작은 덤이다 — 못 하면 그냥 둔다
+                found, why = False, ""
+            self.audio_detected.emit(str(path), found, why)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_audio_detected(self, path: str, found: bool, why: str) -> None:
+        if not self.media_path or str(self.media_path) != path:
+            return                       # 그 사이 다른 파일을 열었다
+        if self.marker is not None and self.marker.audio_sermon is not None:
+            return                       # 그 사이 사람이 정했다
+        if not found:
+            return
+        self.log(f"음성 설교로 보입니다 — {why}")
+        self._set_audio_mode(True)
+        # 구간이 이미 있으면(저장해 둔 작업) 바로 편집기로 간다. 구간이 없으면 편집기에서
+        # 할 일이 없으므로 [설교 찾기] 에 두고, 아래 안내 줄에 다음 할 일을 적는다.
+        if self.marker is not None and self.marker.clips:
+            self.log("  [음성 설교] 편집기로 넘어갑니다. 아니면 [음성 설교] 칸을 끄세요.")
+            if not getattr(self, "_busy", False):
+                self.tabs.setCurrentIndex(self.TAB_VISUAL)
+            elif getattr(self, "_mode_before_job", None) is not None:
+                self._mode_before_job = self.TAB_VISUAL     # 작업이 끝나면 이 칸으로
+        else:
+            self.log("  [음성 설교] 를 켰습니다. 설교 구간을 정한 뒤 [3. 음성 설교 영상 만들기] 를"
+                     " 누르면 편집기가 열립니다.  아니면 [음성 설교] 칸을 끄세요.")
+
+    def _set_audio_mode(self, on: bool) -> None:
+        """프로그램이 [음성 설교] 칸을 켜고 끌 때. 사람의 선택으로 적지 않는다."""
+        self.audio_check.blockSignals(True)
+        self.audio_check.setChecked(on)
+        self.audio_check.blockSignals(False)
+        self._show_audio_mode(on)
+
+    def _on_audio_toggled(self, on: bool) -> None:
+        """사람이 [음성 설교] 칸을 눌렀다 — 이 설교에 그 뜻을 적어 둔다."""
+        if self.marker is not None:
+            self.marker.audio_sermon = on
+        self._show_audio_mode(on)
+        if on and self.marker is not None and self.marker.clips:
+            self.tabs.setCurrentIndex(self.TAB_VISUAL)
+        elif not on and self.tabs.currentIndex() == self.TAB_VISUAL:
+            self.tabs.setCurrentIndex(0)
+
+    def _show_audio_mode(self, on: bool) -> None:
+        if hasattr(self, "hint"):
+            self._update_hint()
+        self.btn_export.setText("3.  음성 설교 영상 만들기" if on else "3.  설교 영상 만들기")
+        self.btn_export.setToolTip(
+            "[음성 설교] 편집기를 엽니다. 설교 구간의 소리 위에 사진·영상을 타임라인으로 놓고\n"
+            "글자·음악을 골라 영상을 만듭니다." if on else "")
+
+    def _fill_visual_panel(self) -> None:
+        """[음성 설교] 칸을 채운다. 폴더·음악은 지난번 것을, 글자는 이 설교 것을."""
+        st = QSettings("창의진교회", "SermonTool")
+        self.visual_tab.set_options(self._visual_defaults(),
+                                    str(st.value("visual_music", "") or ""))
+
+    def _save_visual_prefs(self) -> None:
+        """고른 것을 기억한다. 음악·기본 길이는 다음 설교에도 그대로 쓰는 일이 많다.
+        사진·영상 목록은 편집기가 따로 기억한다 (visual_bin)."""
+        opts = self.visual_tab.options()
+        st = QSettings("창의진교회", "SermonTool")
+        st.setValue("visual_seconds", opts.photo_seconds)
+        st.setValue("visual_fill", opts.fill)
+        st.setValue("visual_corner", opts.corner)
+        st.setValue("visual_music", self.visual_tab.music_edit.text().strip())
+        st.setValue("visual_music_on", bool(opts.music))
+        st.setValue("visual_music_level", opts.music_level)
+
+    def _on_visual_title(self, text: str) -> None:
+        if self.sermon_title_edit.text() != text:
+            self.sermon_title_edit.setText(text)
+
+    def _on_visual_verse(self, text: str) -> None:
+        if self.marker is not None:
+            self.marker.sermon_verse = " ".join(text.split())
+
+    def _on_visual(self) -> bool:
+        return hasattr(self, "visual_tab") and self.tabs.currentWidget() is self.visual_tab
+
+    def _on_reels(self) -> bool:
+        return hasattr(self, "reels_tab") and self.tabs.currentWidget() is self.reels_tab
+
+    # -------- 숏폼 편집 (세로 영상 모양) --------
+    def _reel_runs(self) -> tuple[list[tuple[float, float]], str]:
+        """(이어붙일 조각, 어디서 왔나).
+
+        picks  [요약] 에서 고른 문장
+        range  고른 문장이 없으면 설교 구간 전체 (2026-11-02 사용자: 안 골라도 만들 수 있게)
+        whole  구간도 없으면 연 영상 전체 (예: 이미 만든 세로 요약 영상을 다시 꾸밀 때)
+        """
+        if self.sum_marks and any(m.chosen for m in self.sum_marks):
+            runs = hl_mod.runs(self.sum_marks, self._summary_snap())
+            if runs:
+                return runs, "picks"
+        if self.marker and self.marker.clips:
+            ranges = [(a, b) for a, b, _ in self.marker.ranges()]
+            if ranges:
+                return ranges, "range"
+        dur = float(getattr(self.marker, "duration", 0) or 0) if self.marker else 0.0
+        if dur <= 0 and self.media_path and Path(self.media_path).exists():
+            dur = float(ffprobe_duration(Path(self.media_path)) or 0)
+        return [(0.0, max(1.0, dur))], "whole"
+
+    def _sync_reels(self) -> None:
+        """[숏폼 편집] 에 지금 영상(조각·자막·제목)을 알려 준다."""
+        if not hasattr(self, "reels_tab"):
+            return
+        runs, kind = self._reel_runs()
+        cues = []
+        if self.transcript:
+            srt = export_mod.build_srt([(a, b, "summary") for a, b in runs],
+                                       [b - a for a, b in runs], self.transcript)
+            cues = reels_mod.parse_srt(srt)
+        verse = getattr(self.marker, "sermon_verse", "") if self.marker else ""
+        if not verse and self.marker and self.transcript:
+            try:
+                verse = export_mod._guess_verse(self.transcript, self.marker)
+            except Exception:
+                verse = ""
+        hook = getattr(self.marker, "reel_hook", "") if self.marker else ""
+        self.reels_tab.set_session(self.media_path, runs, cues,
+                                   self.sermon_title_edit.text().strip(), verse, hook, kind)
+
+    def on_reels_transcribe(self) -> None:
+        """[숏폼 편집] 의 [받아쓰기로 자막 만들기] — 쓰는 부분만 받아쓴다."""
+        src = self.media_path
+        if not self.marker or not src or not Path(src).exists():
+            return
+        runs, _kind = self._reel_runs()
+        cfg = self._config()
+        marker = self.marker
+        wav = cfg.audio_path(marker.video_id)
+        total = sum(b - a for a, b in runs)
+
+        def job():
+            if not wav.exists():
+                print("받아쓰기용 소리를 뽑습니다")
+                from core.voiceprint import to_wav
+                to_wav(Path(src), wav)
+            got: list[dict] = []
+            for a, b in runs:
+                got.extend(transcribe.transcribe_range(wav, a, b, cfg, "숏폼 자막"))
+            return got
+
+        def done(got):
+            # 이미 있던 자막 중 이번에 받아쓴 부분과 겹치는 것은 새것으로 바꾼다
+            keep = [seg for seg in self.transcript
+                    if not any(seg["end"] > a and seg["start"] < b for a, b in runs)]
+            self.transcript = sorted(keep + list(got), key=lambda seg: seg["start"])
+            try:
+                transcribe.save_transcript(cfg.transcript_path(marker.video_id), self.transcript)
+            except OSError as exc:
+                self.log(f"자막을 저장하지 못했습니다: {exc}")
+            self._sync_reels()
+
+        self._run(job, done, title="숏폼 자막 받아쓰기",
+                  detail=f"{int(total // 60)}분 {int(total % 60):02d}초",
+                  done_message="자막을 만들었습니다",
+                  next_step="[숏폼 편집] 에서 미리 보고 만드세요",
+                  est_kind="stt", est_minutes=total / 60, est_model=cfg.whisper_model)
+
+    def _on_reel_hook(self, text: str) -> None:
+        if self.marker is not None and getattr(self.marker, "reel_hook", "") != text:
+            self.marker.reel_hook = text
+            self._visual_save_timer.start()
+
+    def on_reels_export(self) -> None:
+        """[숏폼 편집] 의 모양으로 세로 영상을 만든다. 미리 보기와 같은 그림을 얹는다."""
+        self._sync_reels()                      # 고른 문장이 바뀌었을 수 있다
+        runs, kind = self._reel_runs()
+        if kind == "picks":
+            what = blocks_mod.short_name(self._sum_format())
+            src = self._summary_ready("영상")
+            if not src:
+                return
+            tag = export_mod.summary_tag(self.marker) + "_숏폼"
+        else:
+            what = "숏폼"
+            src = self.media_path
+            if not self.marker or not src or not Path(src).exists():
+                return
+            if not self._ask_title():
+                return
+            self.on_save()
+            tag = "숏폼"
+        total = sum(b - a for a, b in runs)
+        if total > 180:
+            answer = QMessageBox.question(
+                self, "3분이 넘습니다",
+                f"{int(total // 60)}분 {int(total % 60):02d}초짜리가 만들어집니다.\n"
+                "릴스·쇼츠는 보통 3분 안쪽입니다 (짧게 하려면 [요약] 에서 문장을 고르세요).\n\n"
+                "[Yes] 이대로 만들기   [No] 그만두기",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if answer != QMessageBox.Yes:
+                return
+        cfg = self._config()
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            look = self.reels_tab.render_for_build(Path(cfg.cache_dir) / "reel_render")
+        finally:
+            QApplication.restoreOverrideCursor()
+        marker, transcript = self.marker, self.transcript
+        wav = cfg.audio_path(marker.video_id)
+        total = sum(b - a for a, b in runs)
+
+        def job():
+            return export_mod.export_summary(marker, cfg, Path(src), transcript, wav,
+                                             look=look, runs=runs, tag=tag)
+
+        def done(result):
+            lines = "\n".join(f"{k}: {v}" for k, v in result.items())
+            self.log(lines)
+            box = QMessageBox(self)
+            box.setWindowTitle(f"{what} 완료")
+            box.setText(lines)
+            open_btn = box.addButton("폴더 열기", QMessageBox.ActionRole)
+            box.addButton("닫기", QMessageBox.AcceptRole)
+            box.exec()
+            if box.clickedButton() is open_btn:
+                folder = Path(result["video"]).parent
+                QDesktopServices.openUrl(_QUrl.fromLocalFile(str(folder.resolve())))
+
+        self._run(job, done,
+                  title=f"{what} 영상 만들기 (숏폼 편집)",
+                  detail=(f"조각 {len(runs)}개 · {int(total // 60)}분 {int(total % 60):02d}초 "
+                          f"· 세로 1080x1920 · 자막 {len(look['captions'])}덩어리"),
+                  done_message=f"{what} 영상을 만들었습니다",
+                  next_step="[폴더 열기] 로 확인하세요")
+
+    def _sync_visual(self, full: bool = False) -> None:
+        """편집기에 지금 설교(소리 파일 · 구간 · 저장해 둔 타임라인)를 알려 준다."""
+        if not hasattr(self, "visual_tab"):
+            return
+        ranges = [(a, b) for a, b, _ in self.marker.ranges()] if self.marker else []
+        same = (self.visual_tab.media_path == (Path(self.media_path) if self.media_path else None))
+        if full or not same:
+            items = list(getattr(self.marker, "visual_items", []) or []) if self.marker else []
+            self.visual_tab.set_session(self.media_path, ranges, items)
+        else:
+            self.visual_tab.set_ranges(ranges)
+
+    def _on_visual_items(self) -> None:
+        """타임라인이 바뀌었다 — 이 설교의 작업에 적고 잠시 뒤 파일로 저장한다."""
+        if self.marker is None:
+            return
+        self.marker.visual_items = self.visual_tab.options().items
+        self._visual_save_timer.start()
+
+    def _save_marker_quiet(self) -> None:
+        if self.marker is None:
+            return
+        try:
+            self.marker.save(self._config().marker_path(self.marker.video_id))
+        except OSError as exc:
+            self.log(f"타임라인을 저장하지 못했습니다: {exc}")
 
 
 def export_local_wrapper(marker, cfg, src, transcript, exact):

@@ -1,6 +1,10 @@
 @echo off
 setlocal
 cd /d "%~dp0"
+rem numpy/OpenBLAS grabs one buffer per CPU thread when it loads. On a PC short of commit memory that fails
+rem with "OpenBLAS error: Memory allocation still failed". The build needs no BLAS threads.
+if not defined OPENBLAS_NUM_THREADS set OPENBLAS_NUM_THREADS=1
+if not defined OMP_NUM_THREADS set OMP_NUM_THREADS=1
 
 echo ============================================
 echo  SermonTool - build exe and installer
@@ -59,12 +63,14 @@ if not exist "%ISCC%" set "ISCC=C:\Program Files\Inno Setup 6\ISCC.exe"
 if not exist "%ISCC%" (
   echo   Inno Setup not found. Download: https://jrsoftware.org/isdl.php
   echo   The exe is ready at: dist\SermonTool\SermonTool.exe
+  echo   The zip is ready at : dist\SermonTool_v*.zip
   goto done
 )
 "%ISCC%" installer.iss
 if errorlevel 1 goto err
 echo.
 echo Installer created: Output\SermonToolSetup.exe
+echo Zip for delivery  : dist\SermonTool_v*.zip
 
 :done
 echo.

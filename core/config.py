@@ -156,6 +156,12 @@ class Config:
     shorts_scaler: str = "lanczos"
     shorts_sharpen: float = 0.5       # cas 세기 0~1. 0.7 넘으면 링잉이 보이기 시작한다
 
+    # --- 음성 설교 영상 만들기 (소리만 있는 설교 → 영상, core/visual.py) ---
+    # 배경은 천천히 움직이는 사진이라 같은 crf 에서도 파일이 작다. 40분을 만들어야
+    # 하므로 preset 은 빠른 쪽으로 둔다. 유튜브가 어차피 다시 인코딩한다.
+    visual_crf: int = 20
+    visual_preset: str = "veryfast"
+
     # --- 요약 문장 고르기: 임베딩 + 로컬 LLM ---
     # 둘 다 없어도 3분 요약은 규칙만으로 돌아간다. 있으면 더 잘 고른다.
     #

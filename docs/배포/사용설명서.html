@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>설교영상 편집기 사용설명서</title>
+<style>
+  :root{
+    --ink:#1b1b1f; --dim:#5d6068; --line:#e2e3e8; --bg:#ffffff;
+    --soft:#f6f7f9; --mark:#1d4ed8; --warn:#9a4b00; --warnbg:#fff7ed;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --ink:#e8e9ed; --dim:#a2a6b0; --line:#32353d; --bg:#17181c;
+      --soft:#1f2127; --mark:#7aa2ff; --warn:#ffb871; --warnbg:#2a2017;
+    }
+  }
+  :root[data-theme="dark"]{
+    --ink:#e8e9ed; --dim:#a2a6b0; --line:#32353d; --bg:#17181c;
+    --soft:#1f2127; --mark:#7aa2ff; --warn:#ffb871; --warnbg:#2a2017;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:"Malgun Gothic","맑은 고딕",system-ui,sans-serif;
+    font-size:17px; line-height:1.75; word-break:keep-all;
+  }
+  .wrap{max-width:720px; margin:0 auto; padding:48px 16px 96px}
+  h1{font-size:28px; line-height:1.35; margin:0 0 6px; letter-spacing:-.02em}
+  .sub{color:var(--dim); margin:0 0 40px}
+  h2{font-size:21px; margin:48px 0 14px; padding-top:20px; border-top:1px solid var(--line); letter-spacing:-.01em}
+  h3{font-size:17px; margin:28px 0 8px}
+  p{margin:0 0 14px}
+  ol.steps{counter-reset:s; list-style:none; padding:0; margin:0}
+  ol.steps>li{counter-increment:s; position:relative; padding:0 0 22px 46px; margin:0}
+  ol.steps>li::before{
+    content:counter(s); position:absolute; left:0; top:1px;
+    width:30px; height:30px; border-radius:50%; background:var(--mark); color:#fff;
+    display:flex; align-items:center; justify-content:center; font-size:15px; font-weight:700;
+  }
+  ol.steps>li>b:first-child{display:block; margin-bottom:2px}
+  .btn{
+    display:inline-block; padding:1px 8px; border:1px solid var(--line);
+    border-radius:5px; background:var(--soft); font-size:15px; white-space:nowrap;
+  }
+  .note{
+    background:var(--soft); border-left:3px solid var(--line);
+    padding:14px 16px; margin:18px 0; border-radius:0 8px 8px 0;
+  }
+  .warn{background:var(--warnbg); border-left-color:var(--warn)}
+  .warn b{color:var(--warn)}
+  table{width:100%; border-collapse:collapse; margin:16px 0; font-size:16px}
+  th,td{text-align:left; padding:9px 10px; border-bottom:1px solid var(--line); vertical-align:top}
+  th{color:var(--dim); font-weight:600; white-space:nowrap}
+  code{background:var(--soft); padding:1px 6px; border-radius:4px; font-size:15px;
+       font-family:Consolas,"D2Coding",monospace}
+  ul{margin:0 0 14px; padding-left:22px}
+  li{margin:0 0 6px}
+  .end{margin-top:56px; padding-top:20px; border-top:1px solid var(--line); color:var(--dim); font-size:15px}
+  @media print{
+    body{font-size:11pt} .wrap{padding:0} h2{page-break-after:avoid}
+    ol.steps>li::before{background:#333}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>설교영상 편집기 사용설명서</h1>
+<p class="sub">주일 설교 영상에서 설교 부분만 잘라 내고, 짧은 요약 영상을 만드는 프로그램입니다.</p>
+
+<h2>무엇을 만들 수 있나</h2>
+<table>
+  <tr><th>설교 영상</th><td>예배 전체에서 설교만 잘라 낸 영상. 자막을 넣을 수 있습니다.</td></tr>
+  <tr><th>설교 mp3</th><td>같은 구간을 소리만. 차에서 듣거나 홈페이지에 올릴 때.</td></tr>
+  <tr><th>핵심요약</th><td>세로 영상 1분 40초. 인스타 릴스에 맞는 길이입니다.</td></tr>
+  <tr><th>3분요약</th><td>세로 영상 2분 50초. 유튜브 쇼츠에 맞는 길이입니다.</td></tr>
+  <tr><th>사진·영상 입힌 영상</th><td>소리만 있는 설교에 사진·영상을 깔아 만든 가로 영상. 썸네일 그림과 설명 글도 함께 나옵니다.</td></tr>
+</table>
+<p>만든 파일은 모두 한 폴더에 모입니다. 다 만든 뒤 <span class="btn">폴더 열기</span> 를 누르면 그 폴더가 열립니다.</p>
+
+<h2>처음부터 끝까지</h2>
+<ol class="steps">
+  <li>
+    <b>영상 가져오기</b>
+    유튜브 주소를 맨 위 칸에 붙여넣고 <span class="btn">영상 가져오기</span> 를 누릅니다.
+    컴퓨터에 영상 파일이 있으면 <span class="btn">내 컴퓨터에서 열기</span> 를 쓰세요.
+    옆의 <span class="btn">자막도</span> 에 체크해 두면 자막까지 한 번에 만듭니다.
+  </li>
+  <li>
+    <b>설교 구간 찾기</b>
+    <span class="btn">자동으로 찾기</span> 를 누르면 목사님 목소리를 알아듣고 설교가 시작하고 끝나는 자리를 찾아 줍니다.
+    찾은 자리가 어긋나면 영상을 보다가 <span class="btn">여기가 시작</span>, <span class="btn">여기가 끝</span> 으로 직접 정하셔도 됩니다.
+  </li>
+  <li>
+    <b>설교 제목 적기</b>
+    오른쪽 <b>설교 제목</b> 칸에 제목을 적습니다. 이 제목이 파일 이름이 되고, 요약 영상 위쪽에도 나옵니다.
+  </li>
+  <li>
+    <b>요약 고르기</b>
+    위쪽 <span class="btn">요약</span> 탭으로 가서 <b>형식</b> 을 고르고 <span class="btn">요약 골라줘</span> 를 누릅니다.
+    프로그램이 설교를 읽고 어느 대목을 넣을지 골라 줍니다.
+    마음에 안 드는 대목은 목록에서 체크를 끄거나 <span class="btn">다른 후보</span> 로 바꾸세요.
+  </li>
+  <li>
+    <b>들어보기</b>
+    <span class="btn">요약 미리보기</span> 로 고른 대목만 이어서 들어 봅니다.
+    말이 중간에 잘리거나 뜻이 안 통하면 그 문장을 빼고 다시 들어 보세요.
+  </li>
+  <li>
+    <b>만들기</b>
+    <span class="btn">요약 영상 만들기</span> 를 누릅니다. 설교 길이와 컴퓨터에 따라 몇 분에서 십몇 분쯤 걸립니다.
+    설교 전체 영상은 <span class="btn">요약</span> 탭이 아니라 아래쪽 <span class="btn">설교 영상 만들기</span> 로 만듭니다.
+  </li>
+</ol>
+
+<h2>숏폼 편집 — 릴스·쇼츠 모양으로</h2>
+<p>
+  요약 영상을 다른 교회 릴스처럼 꾸밀 수 있습니다 — 눌러 보고 싶은 큰 제목, 짧게 끊어 나오는 자막,
+  곤색 띠, 교회 로고. <span class="btn">요약</span> 탭의 <span class="btn">숏폼 편집 →</span>
+  (또는 머리띠의 <b>숏폼 편집</b>) 를 누르면 화면 전체가 숏폼 편집 칸으로 바뀝니다.
+  (<span class="btn">요약</span> 탭의 <span class="btn">요약 영상 만들기</span> 는 예전 모양 그대로 만듭니다.)
+</p>
+<ol class="steps">
+  <li>
+    <b>모양 틀 고르기</b>
+    왼쪽에서 그림을 보고 고릅니다 — <b>창의진 기본</b>(곤색 띠·아래 로고), <b>노란 상자 제목</b>(꽉 찬 화면),
+    <b>아래 제목 띠</b>(노란 세로줄), <b>곤색 제목 상자</b>. 고른 뒤 오른쪽에서 무엇이든 바꿀 수 있습니다.
+  </li>
+  <li>
+    <b>끌리는 제목</b>
+    화면에 크게 얹는 제목입니다. 설교 제목보다 쉬운 말, 질문 형태(예: "우리는 무엇을 믿고 도전하나")가 좋습니다.
+    <span class="btn">AI 제목 추천</span> 을 누르면 이 PC 의 AI 가 요약에 들어간 말씀을 읽고 몇 개 지어 줍니다
+    (모델을 올리느라 1~2분 걸릴 수 있습니다). 누르면 들어가고, 고쳐 써도 됩니다. 파일 이름에는 설교 제목이 그대로 쓰입니다.
+  </li>
+  <li>
+    <b>자막 · 화면 · 로고</b>
+    자막은 정한 글자 수 안쪽으로 짧게 끊어 차례로 나옵니다 — 크기·높이·반투명 상자를 고릅니다.
+    미리 보기의 영상을 마우스로 끌면 목사님 자리가 옮겨지고, 휠을 돌리면 크기가 바뀝니다.
+    <span class="btn">로고 고르기…</span> 로 교회 로고 그림(png, 바탕이 투명하면 좋음)을 고르고 자리·크기를 정합니다.
+    고른 모양은 기억되어 다음 설교에도 그대로입니다.
+  </li>
+  <li>
+    <b>미리 보고 만들기</b>
+    <span class="btn">▶ 재생</span>(Space) 으로 소리와 함께 봅니다. 미리 보기와 똑같은 띠·제목·자막·로고가 들어갑니다.
+    <span class="btn">이 모양으로 숏폼 만들기</span> 를 누르면 <code>…_핵심요약_숏폼.mp4</code>(또는 3분요약) 로 저장됩니다.
+  </li>
+</ol>
+<table>
+  <tr><th>문장을 안 골랐을 때</th><td>[요약] 에서 고른 문장이 없으면 설교 구간 전체로, 구간도 없으면 연 영상 전체로 만듭니다
+    (<code>…_숏폼.mp4</code>). 3분이 넘으면 한 번 묻습니다.</td></tr>
+  <tr><th>이미 만든 세로 영상</th><td>예전에 만든 <code>…_핵심요약.mp4</code> 같은 세로 영상을 [내 컴퓨터에서 열기] 로 열면,
+    <b>원본에서</b> 칸이 저절로 <b>예전 요약 영상 — 가운데 영상만</b> 으로 바뀌어 예전 제목·자막이 들어 있던 위아래 띠를 빼고
+    새 모양을 입힙니다. 다른 세로 영상은 <b>화면 그대로</b> 씁니다.</td></tr>
+  <tr><th>자막이 없을 때</th><td><span class="btn">받아쓰기로 자막 만들기</span> 를 누르면 그 영상의 말을 받아써 자막을 만듭니다
+    (영상 길이만큼쯤 걸립니다). 자막 없이 만들어도 됩니다.</td></tr>
+</table>
+
+<div class="note">
+  <b>중간에 덮어써도 괜찮습니다.</b>
+  고른 문장과 구간은 그때그때 저장됩니다. 프로그램을 닫았다 켜고
+  <span class="btn">이전 작업 불러오기</span> 를 누르면 하던 자리에서 이어서 하실 수 있습니다.
+</div>
+
+<h2>소리만 있는 설교를 영상으로</h2>
+<p>
+  화면 없이 소리만 올라온 설교나, 녹음 파일(mp3)만 있는 설교에 씁니다.
+  설교 구간만 잘라 그 소리 위에 교회 사진·영상을 깔고 제목과 본문을 얹어, 바로 올릴 수 있는 영상을 만듭니다.
+  유튜브든 인스타그램이든 올리실 곳은 자유롭게 고르시면 됩니다.
+</p>
+<ol class="steps">
+  <li>
+    <b>설교 소리 열기</b>
+    유튜브 주소를 넣고 <span class="btn">영상 가져오기</span> 를 누르거나,
+    <span class="btn">내 컴퓨터에서 열기</span> 로 mp3·m4a·wav 파일을 엽니다.
+    음성 설교로 보이면(제목에 '음성' 이 있거나 화면이 처음부터 끝까지 그대로면) 프로그램이 알아보고
+    오른쪽의 <span class="btn">음성 설교</span> 칸을 켭니다. 그러면 큰 단추가
+    <span class="btn">3. 음성 설교 영상 만들기</span> 로 바뀝니다.
+    못 알아보면 직접 켜고, 잘못 켜졌으면 끄면 됩니다.
+  </li>
+  <li>
+    <b>설교 구간 정하기</b>
+    평소처럼 <span class="btn">자동으로 찾기</span> 를 누르거나 <span class="btn">여기가 시작</span>,
+    <span class="btn">여기가 끝</span> 으로 정합니다.
+  </li>
+  <li>
+    <b>편집기 열기</b>
+    <span class="btn">3. 음성 설교 영상 만들기</span> 를 누르면(또는 머리띠의 <b>음성 설교</b>) 화면 전체가
+    편집기로 바뀝니다. 왼쪽은 사진·영상 목록, 가운데는 미리 보기, 오른쪽은 설정, 아래는 타임라인입니다.
+  </li>
+  <li>
+    <b>사진·영상 놓기 (없어도 됩니다)</b>
+    <span class="btn">넣기…</span>·<span class="btn">폴더째…</span> 로 목록에 사진·영상을 넣습니다(탐색기에서 끌어 놓아도 됩니다).
+    목록은 기억되므로 다음 설교에도 그대로 있습니다. 목록에서 타임라인으로 끌어 놓거나,
+    두 번 누르거나, <span class="btn">모두 넣기 ▾</span> 로 한꺼번에 놓습니다.
+    타임라인에서 장면을 끌면 순서가, 장면 오른쪽 끝을 끌면 길이가 바뀝니다.
+    타임라인을 비워 두면 짙은 곤색 바탕에 제목과 본문만 띄워 만듭니다.
+  </li>
+  <li>
+    <b>장면 꾸미기</b>
+    타임라인에서 장면을 누르면 오른쪽 <b>고른 장면</b> 에서 길이, 움직임(다가가기·물러나기·흐르기·움직이지 않기),
+    앞 장면에서 넘어오는 모양(겹쳐·검게·하얗게·밀기·닦기·동그랗게·바로)과 그 시간, 영상의 시작 지점을 고릅니다.
+    <span class="btn">모든 장면에 같게</span> 로 한 번에 맞출 수 있고, 잘못했으면 <span class="btn">되돌리기</span>(Ctrl+Z).
+  </li>
+  <li>
+    <b>미리 보고 만들기</b>
+    <span class="btn">▶ 재생</span>(Space) 으로 설교 소리와 함께 움직이는 화면을 미리 봅니다 — 만들어질 영상과 같은 움직임·넘기기·글자입니다
+    (배경 음악과 시작 영상은 미리 보기에 나오지 않습니다). 설교 제목·본문·배경 음악을 확인하고
+    <span class="btn">음성 설교 영상 만들기</span> 를 누릅니다. 타임라인은 설교마다 저절로 저장됩니다.
+  </li>
+  <li>
+    <b>올리기</b>
+    만든 폴더에 세 파일이 생깁니다. 올리실 곳(유튜브·인스타그램 등)에 <code>…_영상.mp4</code> 를 올리고,
+    썸네일은 <code>…_썸네일.jpg</code> 를, 제목과 설명은 <code>…_설명글.txt</code> 의 글을 복사해 붙여 넣으세요.
+  </li>
+</ol>
+<table>
+  <tr><th>사진</th><td>정한 길이(기본 20초) 동안 고른 움직임대로 천천히 움직입니다. 세로 사진은 가운데에 두고 양옆을 흐리게 채웁니다.</td></tr>
+  <tr><th>영상</th><td>소리는 빼고 화면만 씁니다. 장면이 영상보다 길면 처음부터 되풀이합니다.</td></tr>
+  <tr><th>장면이 모자라면</th><td>타임라인이 설교보다 짧으면 처음 장면부터 되풀이하거나(타임라인에 흐리게 보임), 마지막 장면을 끝까지 늘입니다. 설교보다 길면 넘는 장면은 나오지 않습니다(어둡게 보임).</td></tr>
+  <tr><th>글자</th><td>처음 8초는 제목과 본문을 화면 가운데에 크게, 그 뒤에는 왼쪽 위에 작게 둡니다.
+    배경 없이 만들면 곤색 바탕 가운데에 처음부터 끝까지 둡니다.</td></tr>
+  <tr><th>시작 영상</th><td>[고급 설정] 에서 고른 짧은 영상(교회 로고·인사말 등)이 있으면 설교 앞에 붙습니다. 없으면 바로 설교부터 시작합니다.</td></tr>
+  <tr><th>배경 음악</th><td>목사님이 말씀하실 때는 저절로 작아지고, 한참 쉬실 때만 살짝 올라옵니다.</td></tr>
+</table>
+<div class="note">
+  <b>시간이 걸립니다.</b>
+  화면을 처음부터 그리므로 40분 설교에 PC 에 따라 20분~1시간쯤 걸립니다. 한 번 준비한 사진은 다시 준비하지 않으므로,
+  같은 사진으로 두 번째 만들 때는 조금 빨라집니다. 만드는 동안 디스크가 몇 GB 필요합니다.
+</div>
+
+<h2>자막이 틀렸을 때</h2>
+<p>
+  <span class="btn">자막 고치기</span> 탭에서 문장을 두 번 클릭하면 그 자리에서 고칠 수 있습니다.
+  고친 내용은 자막 파일과 영상에 넣는 자막에 그대로 들어갑니다.
+</p>
+<p>
+  같은 말을 자꾸 틀리게 받아쓴다면 <code>고칠말.txt</code> 를 메모장으로 열어 한 줄씩 적어 두세요.
+  다음부터는 프로그램이 알아서 고칩니다.
+</p>
+<p><code>니에미아 =&gt; 느헤미야</code> 처럼 적으면 됩니다.</p>
+
+<h2>느리거나 멈출 때</h2>
+<p>
+  영상 만들기는 메모리를 많이 씁니다. 모자라면 프로그램이 알아서 조금씩 나눠 만들기 때문에
+  느려질 뿐 끝까지 갑니다. 그래도 멈춘다면 아래를 보세요.
+</p>
+
+<div class="note warn">
+  <b>[메모리 넉넉하게 만들기]</b><br>
+  위쪽 <span class="btn">기록</span> 을 눌렀을 때 이 단추가 보이면, 이 컴퓨터는 윈도우가 내주는 메모리가 모자란 상태입니다.
+  한 번 누르고 윈도우가 묻는 창에 <b>예</b> 를 누른 뒤, <b>윈도우를 다시 시작</b>하시면 풀립니다.
+  메모리가 넉넉한 컴퓨터에서는 이 단추가 아예 보이지 않습니다.
+</div>
+
+<ul>
+  <li>다른 프로그램(특히 브라우저 탭이 많이 열린 창)을 닫으면 나아집니다.</li>
+  <li>그래도 안 되면 <span class="btn">기록</span> 에 적힌 글을 그대로 복사해 알려 주세요. 무엇이 모자랐는지 숫자까지 적혀 있습니다.</li>
+</ul>
+
+<h2>자주 묻는 것</h2>
+
+<h3>인터넷이 없어도 되나요?</h3>
+<p>
+  유튜브에서 영상을 받아올 때만 인터넷이 필요합니다. 자막 만들기, 요약 고르기, 영상 만들기는
+  모두 이 컴퓨터 안에서 돌아갑니다. 설교 내용이 바깥으로 나가지 않습니다.
+</p>
+
+<h3>만든 파일은 어디 있나요?</h3>
+<p>
+  다 만든 뒤 나오는 창에서 <span class="btn">폴더 열기</span> 를 누르면 바로 열립니다.
+  프로그램이 쓰는 폴더는 <span class="btn">기록</span> 맨 윗줄에도 적혀 있습니다.
+</p>
+
+<h3>요약이 마음에 안 들면요?</h3>
+<p>
+  <span class="btn">요약 골라줘</span> 는 밑그림을 그려 주는 것입니다. 고르고 빼는 것은 사람이 하는 일입니다.
+  목록에서 체크를 끄고 켜면 길이가 바로바로 다시 계산됩니다.
+  한 칸을 통째로 바꾸고 싶으면 <span class="btn">다른 후보</span> 를 누르세요.
+</p>
+
+<h3>같은 설교로 두 가지를 다 만들어도 되나요?</h3>
+<p>
+  됩니다. 형식을 바꿔 가며 만들면 파일 이름이 <code>…_핵심요약.mp4</code>, <code>…_3분요약.mp4</code> 로
+  달리 저장되므로 섞이지 않습니다.
+</p>
+
+<p class="end">
+  요약을 어떤 기준으로 고르는지는 같은 폴더의 <b>요약은 어떻게 고르나</b> 를 보세요.<br>
+  창의진교회 설교영상 편집기
+</p>
+
+</div>
+</body>
+</html>

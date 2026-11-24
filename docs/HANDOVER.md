@@ -27,6 +27,9 @@
 | 3분 요약 — 문장 임베딩으로 더 잘 고르기 | 코드는 됨. **모델 품질 미검증** |
 | 3분 요약 — 로컬 LLM 으로 고르기 | 코드는 됨. **모델 품질 미검증** |
 | 시작 영상 앞에 붙이기 | 됨 |
+| **숏폼 편집** (`core/reels.py`, `ui_reels.py`) | **됨** (2026-11-02, v2.1). 요약 세로 영상의 모양 (틀 4가지 · 끌리는 제목 + AI 추천 · 짧게 끊은 자막 · 띠 색 · 로고 · 목사님 자리). 띠·제목·로고·자막은 `ui_reels.paint_overlay`/`paint_caption` 이 Qt 로 그리고, 만들 때 같은 함수로 PNG 를 그려 `shorts.build(look=...)` 가 얹는다(자막은 ffconcat 그림 차례) — 미리 보기와 완성본이 같다. look 을 안 주면 shorts.build 는 예전과 똑같은 명령을 낸다(selftest `check_reels`). 모양은 QSettings `reel_look`, 끌리는 제목은 `marker.reel_hook`. [요약] 탭의 [요약 영상 만들기] 는 예전 모양. AI 제목은 llama-server 가 없는 컨테이너에서는 못 돌려 봄 |
+| **음성 설교에 사진·영상 입혀 영상 만들기** (`core/visual.py`, `ui_visual.py`) | **됨** (2026-11-02, v2.1). 머리띠의 [음성 설교] 모드는 화면 전체를 쓰는 간단한 편집기(`ui_visual.VisualPanel`: 목록 `MediaBin` · 미리 보기 `Monitor`/`Renderer` · 타임라인 `Timeline`)다. 장면은 `marker.visual_items` 에 저장되고, 칸 나누기는 `visual.slots_from_items` 하나를 미리 보기와 완성본이 같이 쓴다(넘김은 ffmpeg xfade, 미리 보기는 같은 모양을 QPainter 로). 사진·영상 목록은 QSettings `visual_bin`. 파일을 열면 `visual.looks_audio_only()` 가 뒤에서 알아보고(제목 '음성' · 화면 없음 · 화면 그대로) [음성 설교] 체크를 켜며, 그러면 [3.] 단추가 [음성 설교 영상 만들기] 로 바뀐다. 사람이 누른 체크는 `marker.audio_sermon` 에 남아 다시 알아보지 않는다. 실제 교회 사진으로는 아직 안 만들어 봄 |
+| 배경 음악 자동 덕킹 (`core/ducking.py`, FilmCraft 이식) | 됨. FilmCraft 시험 값과 같음 (`selftest.py`) |
 | exe 빌드 · 다른 PC 배포 | 됨 |
 | 채널 감시 자동 처리 (`auto.py`) | 코드는 있으나 **장기 운영 검증 안 됨** |
 | 라이브 실시간 검출 | 안 됨 (설계만) |

@@ -54,6 +54,14 @@ def main() -> int:
     assert any("요약" in n for n in names), names
     print(f"창 OK      {win.windowTitle()}  ·  탭 {len(names)}개")
 
+    # [음성 설교] — 칸을 켜면 [3.] 단추 글자가 바뀌고 그 칸으로 간다 (2026-11-02)
+    assert names[win.TAB_VISUAL] == "음성 설교" and names[win.TAB_LOG] == "진행 로그", names
+    assert names[win.TAB_REELS] == "숏폼 편집", names
+    win._set_audio_mode(True)
+    assert "음성 설교" in win.btn_export.text(), win.btn_export.text()
+    win._set_audio_mode(False)
+    assert "음성" not in win.btn_export.text(), win.btn_export.text()
+
     cfg = win._config()
     vid = pick_video(cfg)
     if not vid:
@@ -146,7 +154,8 @@ def main() -> int:
              "구간 목록": win.clip_list, "구간 추가": win.btn_add,
              "시작 조정": win.btn_edge_start, "요약 골라줘": win.btn_sum_pick,
              "요약 목록": win.sum_list, "고르는 방법": win.pick_mode_box,
-             "요약 mp3": win.btn_sum_mp3}
+             "요약 mp3": win.btn_sum_mp3, "음성 설교 영상 만들기": win.btn_visual,
+             "숏폼 편집 칸": win.reels_tab}
     win._set_busy(True)
     open_ = [n for n, x in guard.items() if x.isEnabled()]
     assert not open_, f"작업 중에도 만질 수 있다: {open_}"

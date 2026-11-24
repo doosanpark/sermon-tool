@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import os
 import shutil
 import subprocess
 import sys
@@ -21,6 +22,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 APP_NAME = "SermonTool"
+
+# 빌드 중 PyInstaller 는 numpy 를 여러 번 불러 본다. numpy 의 OpenBLAS 는 불러올 때
+# CPU 스레드 수만큼 작업 버퍼를 한꺼번에 잡는데, 쓸 수 있는 메모리(commit)가 모자란 PC 에서는
+# 여기서 "OpenBLAS error: Memory allocation still failed" 로 죽는다(2026-10-22 실제로 겪음).
+# 빌드에는 행렬 계산이 필요 없으므로 1 로 줄여 버퍼를 최소로 한다. 자식 프로세스에 이어진다.
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
 
 # AI 분석에 필요한, PyInstaller 가 스스로 못 찾는 패키지들
 # full 빌드에서만 넣는 무거운 것들 (화자 분리용). lite 에서는 제외한다.
@@ -117,7 +125,8 @@ def check_pyinstaller() -> None:
         raise SystemExit(1)
 
 
-def build(full: bool, console: bool, clean: bool, models: bool = True) -> Path:
+def build(full: bool, console: bool, clean: bool, models: bool = True,
+          zip_it: bool = True, pack_it: bool = True) -> Path:
     check_python()
     check_pyinstaller()
     sep = ";" if sys.platform == "win32" else ":"   # --add-data 구분자
@@ -140,12 +149,13 @@ def build(full: bool, console: bool, clean: bool, models: bool = True) -> Path:
 
     # bin\ 의 외부 실행파일(ffmpeg, ffprobe, yt-dlp)을 통째로 묶는다
     bin_dir = ROOT / "bin"
-    models = sorted(f.name for f in (bin_dir / "models").glob("*.onnx"))
-    if models:
-        print(f"모델 포함: {', '.join(models)}")
+    # (이 이름을 models 로 두면 매개변수 models(bool)를 덮어써서 --no-models 가 안 먹는다)
+    onnx_models = sorted(f.name for f in (bin_dir / "models").glob("*.onnx"))
+    if onnx_models:
+        print(f"모델 포함: {', '.join(onnx_models)}")
     exes = sorted(f.name for f in bin_dir.glob("*.exe"))
     llama = bin_dir / "llama"
-    if exes or models:
+    if exes or onnx_models:
         # bin\ 을 통째로 넣으므로 bin\llama\ 도 함께 들어간다
         args += ["--add-data", f"{bin_dir}{sep}bin"]
         print(f"bin\\ 포함: {', '.join(exes)}")
@@ -224,7 +234,73 @@ def build(full: bool, console: bool, clean: bool, models: bool = True) -> Path:
     if out.exists():
         size = sum(f.stat().st_size for f in out.rglob("*") if f.is_file())
         print(f"크기: {size/1024/1024:.0f} MB")
+        if zip_it:
+            make_zip(out, with_models=models)
+        if pack_it:
+            make_pack()
     return out
+
+
+def make_pack() -> None:
+    r"""dist\배포자료\ — 다른 PC 에서 빌드할 때 건네는 자료 꾸러미.
+
+    --clean 이 dist 를 지우므로, 빌드가 다 끝난 **뒤에** 만든다.
+    안에는 성문·고칠말·AI 모델과 시작하기.bat 이 들어 있다 (tools/prepare_build.py).
+    실패해도 빌드는 이미 끝났으므로 알리고 넘어간다.
+    """
+    try:
+        sys.path.insert(0, str(ROOT / "tools"))
+        import prepare_build
+        prepare_build.pack()
+    except Exception as exc:
+        print(f"\n배포자료를 만들지 못했습니다 ({type(exc).__name__}: {exc})")
+        print("  빌드 결과는 그대로입니다. 나중에 배포자료_만들기.bat 으로 만드세요.")
+
+
+# ------------------------------------------------------------ 건넬 zip
+def make_zip(out: Path, with_models: bool = True) -> Path | None:
+    r"""dist\SermonTool_v2.0.0.zip 을 만든다 — 받는 분께 이 파일 하나만 건네면 된다.
+
+    zip 을 풀면 SermonTool_v2.0.0\ 폴더가 하나 나오고, 그 안의 SermonTool.exe 를
+    두 번 누르면 된다. 모델·설명서·버전.txt 도 그 안에 들어 있다.
+    모델 없이 만든 빌드(--no-models)는 이름 끝에 _모델없음 을 붙여 헷갈리지 않게 한다.
+
+    gguf·onnx 는 이미 압축된 파일이라 다시 압축해 봐야 안 줄고 시간만 걸린다.
+    그래서 그런 것은 압축하지 않고 담는다(ZIP_STORED).
+    """
+    import zipfile
+
+    try:
+        sys.path.insert(0, str(ROOT))
+        from core import version as _v
+        ver = _v.VERSION
+    except Exception as exc:                     # 버전을 못 읽어도 zip 은 만든다
+        print(f"  버전을 읽지 못했습니다 ({exc}) — 이름에 버전이 빠집니다")
+        ver = ""
+    folder = f"{APP_NAME}_v{ver}" if ver else APP_NAME
+    name = folder + ("" if with_models else "_모델없음")
+    target = ROOT / "dist" / f"{name}.zip"
+    target.unlink(missing_ok=True)
+
+    raw = {".gguf", ".onnx", ".zip", ".png", ".jpg", ".mp4", ".mp3", ".pyd", ".dll"}
+    files = sorted(f for f in out.rglob("*") if f.is_file())
+    print(f"\n=== zip 만들기: {target.name} ===")
+    print(f"  파일 {len(files)}개를 묶습니다. 모델이 크면 몇 분 걸립니다.")
+    try:
+        with zipfile.ZipFile(target, "w", allowZip64=True) as z:
+            for i, f in enumerate(files, 1):
+                kind = (zipfile.ZIP_STORED if f.suffix.lower() in raw
+                        else zipfile.ZIP_DEFLATED)
+                z.write(f, Path(folder, f.relative_to(out)).as_posix(), compress_type=kind)
+                if i % 500 == 0:
+                    print(f"  {i}/{len(files)}", flush=True)
+    except OSError as exc:
+        target.unlink(missing_ok=True)
+        print(f"  zip 을 만들지 못했습니다: {exc}")
+        return None
+    print(f"  완료: {target}  ({target.stat().st_size / 1e6:.0f}MB)")
+    print(f"  풀면 {folder}\\ 폴더가 나옵니다 — 그 안의 SermonTool.exe 를 두 번 누르면 됩니다")
+    return target
 
 
 # ------------------------------------------------------- 사용자에게 함께 보낼 것
@@ -351,13 +427,18 @@ def main() -> int:
     ap.add_argument("--clean", action="store_true", help="이전 빌드 캐시 삭제")
     ap.add_argument("--no-models", action="store_true",
                     help="AI 모델을 빼고 빌드 (프로그램만 급히 시험할 때)")
+    ap.add_argument("--no-pack", action="store_true",
+                    help="dist\\배포자료\\ 를 만들지 않는다")
+    ap.add_argument("--no-zip", action="store_true",
+                    help="dist\\SermonTool_v버전.zip 을 만들지 않는다")
     args = ap.parse_args()
 
     if args.clean:
         for d in ("build", "dist"):
             shutil.rmtree(ROOT / d, ignore_errors=True)
 
-    build(args.full, args.console, args.clean, models=not args.no_models)
+    build(args.full, args.console, args.clean, models=not args.no_models,
+          zip_it=not args.no_zip, pack_it=not args.no_pack)
     print("\n설치본을 만들려면 Inno Setup 으로 installer.iss 를 컴파일하세요.")
     return 0
 

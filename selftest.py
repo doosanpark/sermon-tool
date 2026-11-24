@@ -99,6 +99,9 @@ def main() -> int:
     check_fixwords()
     check_blocks()
     check_training_match()
+    check_ducking()
+    check_visual()
+    check_reels()
 
     print("\n전체 통과")
     return 0
@@ -354,6 +357,244 @@ def check_training_match() -> None:
         tuned.write_bytes(b"gguf")
         assert llm_mod.model_path(cfg) == tuned and llm_mod.is_tuned(cfg)
     print(f"학습 맞춤 OK  묻는 글 {len(asked)}개가 학습 자료와 같음 · 학습한 모델이 있으면 그걸 씀")
+
+
+def check_ducking() -> None:
+    """FilmCraft 의 ducking.rs 시험을 그대로 옮겼다 — 같은 값이 나와야 같은 방법이다."""
+    import tempfile
+    import wave
+    from pathlib import Path
+
+    import numpy as np
+
+    from core import ducking as d
+
+    sr = 1000.0
+    x = np.array([0.0 if i < 1000 else (0.1 if i % 2 == 0 else -0.1) for i in range(2000)])
+    e = d.envelope_db(np.stack([x, x], 1), sr, 0.01, 0.02)
+    assert len(e) == 200 and e[10] == d.FLOOR_DB, e[:12]
+    assert abs(e[150] + 20.0) < 0.01, e[150]
+    assert -30.0 < e[100] < -20.0, e[100]
+
+    env = np.full(300, -80.0)
+    for a, b in [(50, 100), (110, 150), (200, 203)]:
+        env[a:b] = -20.0
+    r = d.activity(env, 0.01, -40.0, 0.1, 0.2)
+    assert len(r) == 1 and abs(r[0][0] - 0.5) < 1e-6 and abs(r[0][1] - 1.5) < 1e-6, r
+    assert len(d.activity(env, 0.01, -40.0, 0.1, 0.0)) == 2
+    env2 = np.full(10, -80.0)
+    env2[5:] = 0.0
+    assert d.activity(env2, 0.1, -40.0, 0.0, 0.0) == [(0.5, 1.0)]
+    assert [d.sensitivity_threshold_db(s) for s in (5, 0, 10, 99)] == [-40, -20, -60, -60]
+
+    k = d.duck_keyframes([(2.0, 4.0)], 0.0, 10.0, 0.0, 15.0, 0.5)
+    assert k == [(1.5, 0.0), (2.0, -15.0), (4.0, -15.0), (4.5, 0.0)], k
+    k = d.duck_keyframes([(2.0, 4.0), (4.8, 6.0)], 0.0, 10.0, -3.0, 12.0, 0.5)
+    assert k == [(1.5, -3.0), (2.0, -15.0), (6.0, -15.0), (6.5, -3.0)], k
+    assert len(d.duck_keyframes([(5.0, 6.0), (1.0, 2.0)], 0.0, 10.0, 0.0, 10.0, 0.25)) == 8
+    assert d.duck_keyframes([(-1.0, 2.0)], 0.0, 10.0, 0.0, 10.0, 0.5) == \
+        [(0.0, -10.0), (2.0, -10.0), (2.5, 0.0)]
+    assert d.duck_keyframes([(8.0, 9.75)], 0.0, 10.0, 0.0, 10.0, 0.5)[-1] == (10.0, -5.0)
+    assert d.duck_keyframes([(11.0, 12.0)], 0.0, 10.0, 0.0, 10.0, 0.5) == []
+
+    # 파일을 조금씩 읽어 만든 곡선이 한꺼번에 만든 것과 똑같아야 한다
+    rng = np.random.default_rng(1)
+    rate = 48000
+    n = rate * 3 + 777
+    sig = np.zeros(n)
+    sig[int(0.3 * rate):int(1.9 * rate)] = rng.normal(0, 0.1, int(1.9 * rate) - int(0.3 * rate))
+    pcm = np.clip(np.round(sig * 32768), -32768, 32767).astype("<i2")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "s.wav"
+        with wave.open(str(path), "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(rate)
+            wf.writeframes(pcm.tobytes())
+        ref = d.envelope_db(pcm.astype(np.float64) / 32768.0, rate)
+        got = d.envelope_from_wav(path, block_s=0.37)
+    assert len(ref) == len(got) and float(np.max(np.abs(ref - got))) < 1e-3
+    g = d.gain_curve([(1.0, -10.0), (2.0, -30.0)], 3.0, -10.0)
+    assert abs(g[0] - 10 ** (-0.5)) < 1e-6 and abs(g[-1] - 10 ** (-1.5)) < 1e-6
+    print("덕킹 OK  FilmCraft ducking.rs 시험과 같은 값 · 나눠 읽어도 같은 곡선")
+
+
+def check_reels() -> None:
+    """[숏폼 편집] — 자막 짧게 끊기·자막 차례·틀, 그리고 모양을 안 주면 예전과 같은 그래프."""
+    from pathlib import Path
+
+    from core import reels as r
+    from core import shorts as sh
+
+    cues = [(0.0, 4.0, "힘이 폭력이 되는 거죠 돈도 폭력이 되고요 지위도 폭력이 되고"),
+            (4.0, 4.5, "아멘"), (5.0, 9.0, "")]
+    ch = r.chunk_captions(cues, 12)
+    assert all(len(t.replace(" ", "")) <= 12 for _a, _b, t in ch), ch
+    assert abs(ch[0][0]) < 1e-9 and abs(sum(b - a for a, b, _ in ch[:-1]) - 4.0) < 1e-6
+    assert " ".join(t for _a, _b, t in ch[:-1]) == cues[0][2], "글자가 빠지거나 바뀌면 안 된다"
+    assert ch[-1][2] == "아멘" and len(ch) == len(ch[:-1]) + 1
+    assert r.caption_at(ch, 4.2) == "아멘" and r.caption_at(ch, 4.7) == ""
+    track = r.caption_track([(1.0, 2.0, "a.png"), (3.0, 5.0, "b.png")], 2.5, 4.0)
+    assert track[0] == (None, 0.5) and track[1][0] == "b.png" and abs(track[1][1] - 1.0) < 1e-9
+    assert abs(sum(d for _n, d in r.caption_track([(1.0, 2.0, "a")], 0.0, 10.0)) - 10.0) < 1e-9
+    srt = "1\n00:00:01,000 --> 00:00:02,500\n첫 줄\n\n2\n00:00:03,000 --> 00:00:04,000\n둘째\n"
+    assert r.parse_srt(srt) == [(1.0, 2.5, "첫 줄"), (3.0, 4.0, "둘째")]
+    lk = r.apply_preset(r.Look(logo="logo.png", cx=0.3), "yellow_box")
+    assert lk.layout == "full" and lk.logo == "logo.png" and lk.cx == 0.3, "틀은 로고·자리를 그대로 둔다"
+    assert r.Look.from_dict(lk.to_dict()) == lk and lk.area() == (0, 1920)
+    assert r.clean_hooks("1. 우리는 무엇을 믿고 도전하나\n- \"하나님은 왜 기다리실까?\"\n[1,2]\n") == \
+        ["우리는 무엇을 믿고 도전하나", "하나님은 왜 기다리실까?"]
+    # 모양을 주지 않으면 예전 그래프·크롭과 글자 하나 다르지 않다
+    runs = [(1.0, 3.0), (5.0, 9.0)]
+    assert sh._compose_graph(runs, 300, 320, 10, 20, 29.97, "anull") == \
+        sh._compose_graph(runs, 300, 320, 10, 20, 29.97, "anull", area_y=sh.HEAD_H,
+                          area_h=sh.VIDEO_H)
+    assert sh.crop_rect(1280, 720, 0.44, 0.61, 0.8) == (546, 576, 290, 144)
+    assert sh.crop_rect(1280, 720, 0.44, 0.61, 0.8, 1920)[0] == 324
+    # 세로 영상 · 예전 요약 영상 — 정한 부분 안에서만 자른다
+    mid = r.Look(source="middle", layout="bands")
+    reg = mid.region(1080, 1920)
+    assert reg == (0, 330, 1080, 1140)
+    w, h, x, y = mid.crop(1080, 1920)
+    assert (w, h, x, y) == (1080, 1140, 0, 330), (w, h, x, y)
+    full = r.Look(source="middle", layout="full")
+    w, h, x, y = full.crop(1080, 1920)
+    assert h == 1140 and abs(w / h - 1080 / 1920) < 0.01 and 330 <= y and x + w <= 1080
+    assert r.Look(source="whole", layout="full").crop(1080, 1920) == (1080, 1920, 0, 0)
+    assert "region" in full.build_args(1080, 1920) and "region" not in r.Look().build_args(1280, 720)
+    assert r.Look().crop(1280, 720) == sh.crop_rect(1280, 720, 0.44, 0.61, 0.8)
+    with __import__("tempfile").TemporaryDirectory() as tmp:
+        png = sh._blank_png(Path(tmp) / "b.png", 8, 4)
+        assert png.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+        lst = r.ffconcat([("a.png", 1.5), ("blank.png", 0.0)], "blank.png", Path(tmp) / "c.txt")
+        assert lst.read_text(encoding="utf-8").splitlines()[-1] == "file 'a.png'"
+    print(f"숏폼 모양 OK  자막 {len(ch)}덩어리로 끊기 · 차례 · 틀 {len(r.PRESETS)}가지 · "
+          "모양 없으면 예전 그래프 그대로")
+
+
+def check_visual() -> None:
+    """[음성 설교 영상 만들기] 의 칸 나누기·글자 배치·EXIF·ffmpeg 명령 모양."""
+    import struct
+    import tempfile
+    from pathlib import Path
+
+    from core import visual as v
+
+    # 칸 나누기: 이어붙이면 소리 길이와 장면 수가 정확히 같아야 한다
+    photo = v.Media(Path("a.jpg"), "photo")
+    short = v.Media(Path("s.mp4"), "video", seconds=4.0, width=1920, height=1080)
+    long_ = v.Media(Path("l.mp4"), "video", seconds=300.0, width=1080, height=1920)
+    for total in (40 * 60 * 30 + 7, 95 * 30, 13 * 30):
+        for media in ([photo], [short, photo, long_], [short]):
+            slots = v.plan(media, total, 20, False, "x")
+            got = sum(v.segment_frames(slots, i) for i in range(len(slots)))
+            assert got == total, (total, got, [s.frames for s in slots])
+            starts = v.slot_starts(slots)
+            assert starts[0] == 0 and all(b > a for a, b in zip(starts, starts[1:]))
+            if total > 30 * 30:
+                assert slots[0].frames >= (v.CORNER_IN + v.CORNER_FADE) * v.FPS + v.XFADE
+                assert all(s.frames >= 2 * v.XFADE for s in slots)
+    slots = v.plan([short, photo, long_], 40 * 60 * 30, 20, False, "x")
+    assert slots[0].media is photo, "첫 칸이 짧은 영상이면 사진을 앞으로"
+    assert max(s.frames for s in slots if s.media is long_) <= v.VIDEO_MAX_SECONDS * v.FPS
+    a = [s.media.path.name for s in v.plan([photo, short, long_], 9000, 20, True, "id1")]
+    b = [s.media.path.name for s in v.plan([photo, short, long_], 9000, 20, True, "id1")]
+    assert a == b, "섞어도 같은 설교는 같은 순서"
+    calm = v.plan([photo], 9000, 20, False, "x", titled=False, still=True)
+    assert all(s.motion == v.STILL for s in calm), "배경 없이 만들 때는 움직이지 않는다"
+
+    # 글자: 정한 폭과 줄 수를 넘지 않는다. 두 줄이면 길이가 비슷하게 나눈다
+    lines, size = v.fit("부르심을 따라 떠나는 믿음", 1720, (150, 136, 124), 2)
+    assert lines == ["부르심을 따라", "떠나는 믿음"], lines
+    lines, size = v.fit("하나님이 세상을 이처럼 사랑하사 독생자를 주셨으니 이는 그를 믿는 자마다 "
+                        "멸망하지 않고 영생을 얻게 하려 하심이라", 1640, (104, 96, 88, 80, 72), 2)
+    assert len(lines) == 2 and lines[-1].endswith("…")
+    assert all(v.text_px(t, size) <= 1640 for t in lines)
+    assert v.fit("", 100, (10,), 1) == ([], 10)
+
+    # EXIF 방향 (휴대폰 사진)
+    with tempfile.TemporaryDirectory() as tmp:
+        ifd = struct.pack("<H", 1) + struct.pack("<HHII", 0x0112, 3, 1, 6) + struct.pack("<I", 0)
+        app1 = b"Exif\x00\x00" + b"II" + struct.pack("<H", 42) + struct.pack("<I", 8) + ifd
+        jpg = Path(tmp) / "p.jpg"
+        jpg.write_bytes(b"\xff\xd8\xff\xe1" + struct.pack(">H", len(app1) + 2) + app1
+                        + b"\xff\xd9")
+        assert v.exif_orientation(jpg) == 6
+        (Path(tmp) / "q.jpg").write_bytes(b"\xff\xd8\xff\xd9")
+        assert v.exif_orientation(Path(tmp) / "q.jpg") == 1
+        assert v.exif_orientation(Path(tmp) / "none.jpg") == 1
+    assert v._fills_frame(4000, 3000) and v._fills_frame(1920, 1080)
+    assert not v._fills_frame(3000, 4000) and not v._fills_frame(1000, 1000)
+
+    # ffmpeg 명령 모양 — 넘김은 둘째 조각부터, 제목 카드는 첫 조각에만, 끝은 검게
+    real_require = v.require
+    v.require = lambda name: name
+    try:
+        photo.prepared = Path("a_prep.jpg")
+        slots = v.plan([photo, long_], 70 * 30, 20, False, "x")
+        cmds = [v.segment_command(slots, i, Path(f"s{i}.mp4"), Path("card.png"),
+                                  Path("corner.png"), "veryfast", 20, 2)
+                for i in range(len(slots))]
+    finally:
+        v.require = real_require
+    joined = [" ".join(c) for c in cmds]
+    assert "xfade" not in joined[0] and all("xfade" in j for j in joined[1:])
+    assert "card.png" in joined[0] and not any("card.png" in j for j in joined[1:])
+    assert all("corner.png" in j for j in joined)
+    assert "fade=t=in:st=0" in joined[0] and "fade=t=out" in joined[-1]
+    assert all(c[c.index("-frames:v") + 1] == str(v.segment_frames(slots, i))
+               for i, c in enumerate(cmds))
+    text = v.description("부르심을 따라 떠나는 믿음", "창세기 12:1-4", "20261101")
+    assert "부르심을 따라 떠나는 믿음 | 창세기 12:1-4" in text and "2026년 11월 1일" in text
+    # 편집기 타임라인 → 칸: 길이가 정확하고, 넘김·되풀이·자르기가 뜻대로
+    def it(name, dur, trans="dissolve", ts=1.0, kind="photo", motion="auto"):
+        return {"path": name, "kind": kind, "len": 30.0 if kind == "video" else 0.0,
+                "w": 1920, "h": 1080, "dur": dur, "motion": motion, "trans": trans,
+                "trans_s": ts, "in": 0.0}
+    tl = [it("a.jpg", 5), it("b.mp4", 8, "push_left", kind="video"), it("c.jpg", 7, "cut"),
+          it("d.jpg", 6, "black", 1.5, motion="still")]
+    for total in (40 * 60 * 30 + 7, 95 * 30, 13 * 30, 23 * 30):
+        for fill in ("repeat", "hold"):
+            slots = v.slots_from_items(tl, total, fill)
+            got = sum(v.segment_frames(slots, i) for i in range(len(slots)))
+            assert got == total, (total, fill, got)
+            assert slots[0].xfade == 0 and all(s.frames > s.xfade for s in slots)
+            if fill == "hold":
+                assert not any(s.ghost for s in slots) and len(slots) <= len(tl)
+    slots = v.slots_from_items(tl, 40 * 60 * 30, "repeat")
+    assert [s.item for s in slots[:6]] == [0, 1, 2, 3, 0, 1] and slots[4].ghost
+    assert slots[1].transition == "slideleft" and slots[1].xfade == 30
+    assert slots[2].xfade == 0, "바로 넘기기는 겹치지 않는다"
+    assert slots[3].transition == "fadeblack" and slots[3].xfade == 45
+    assert slots[3].motion == v.STILL
+    lay = v.item_layout(tl)
+    assert [x[0] for x in lay] == v.slot_starts(slots)[:4]
+    cut = v.slots_from_items(tl, 10 * 30, "repeat")
+    assert len(cut) == 2 and sum(v.segment_frames(cut, i) for i in range(2)) == 300
+    # 첫 장면이 짧으면 제목 카드가 둘째 조각에도 이어진다 (그 조각 몫만 잘라 쓴다)
+    medias = [v.Media(Path(x["path"]), x["kind"], seconds=x["len"], width=1920, height=1080,
+                      prepared=Path(x["path"])) for x in tl]
+    slots = v.slots_from_items(tl, 60 * 30, "repeat", medias=medias)
+    real_require = v.require
+    v.require = lambda name: name
+    try:
+        c1 = " ".join(v.segment_command(slots, 1, Path("s1.mp4"), Path("card.png"),
+                                        Path("corner.png"), "veryfast", 20, 1, []))
+        c3 = " ".join(v.segment_command(slots, 3, Path("s3.mp4"), Path("card.png"),
+                                        Path("corner.png"), "veryfast", 20, 1, []))
+    finally:
+        v.require = real_require
+    assert "card.png" in c1 and "trim=start=4.0000" in c1 and "xfade=transition=slideleft" in c1
+    assert "card.png" not in c3 and "xfade=transition=fadeblack:duration=1.500" in c3
+    x0, y0, size = v.motion_rect(0, 600, 0)
+    assert abs(size - 1.0) < 1e-9 and v.motion_rect(0, 600, 599)[2] < 0.9
+
+    # 음성 설교 알아보기 — 제목만으로 되는 것과, 없는 파일은 아니라고 하는 것
+    assert v.looks_audio_only("없는파일.mp4", "창의진교회 이른 아침예배 음성 LIVE 방송")[0]
+    assert v.looks_audio_only("없는파일.mp4", "주일예배") == (False, "")
+    print(f"사진·영상 입히기 OK  40분 → 칸 {len(v.plan([photo], 40 * 60 * 30, 20))}개, "
+          "장면 수 정확 · 두 줄 고르게 · EXIF 6 · 첫 조각만 제목 카드 · 음성 설교 알아보기 · "
+          "편집기 타임라인(넘김·되풀이·자르기)")
 
 
 if __name__ == "__main__":

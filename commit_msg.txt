@@ -1,0 +1,16 @@
+노트북 화면 잘림 수정, 자막 엔진 호환 수정, 3분 요약 사전 작업 자동화
+
+- run.bat: .venv 가 있어도 필수 패키지(PySide6 등)가 없으면 requirements.txt 설치.
+  설치 진행 상황을 화면에 보여 준다 (조용하면 멈춘 줄 안다).
+- app.py / ui_summary.py: 화면 배율 150% 노트북에서 아래 탭이 작업 표시줄 뒤로 숨던 문제.
+  위아래를 끌어서 나누는 칸(QSplitter), 영상 칸 스크롤, 세로가 좁으면 최대화로 시작,
+  제목 표시줄까지 재서 화면 안으로 넣기. [3분 요약] 탭을 열면 아래 칸을 넓히고
+  정밀 조정 줄을 잠시 접는다. 요약 버튼은 30px 아래로 줄지 않는다.
+- core/transcribe.py: faster-whisper 1.2.1 + PyAV 19 조합에서
+  "open() got an unexpected keyword argument 'metadata_errors'" 로 자막 만들기가 죽던 문제.
+  ffmpeg 로 만든 16kHz wav 를 직접 읽어 배열로 넘겨 PyAV 를 거치지 않는다.
+- [요약 골라줘]: 설교 구간이나 자막이 없으면 한 번 묻고 대신 만든 뒤 이어서 요약을 고른다.
+  구간이 이미 있으면 구간은 그대로 두고 자막만 만든다 (transcribe_current).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01DpcsyXHQKt3FZjYusVvscy

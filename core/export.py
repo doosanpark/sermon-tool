@@ -214,25 +214,37 @@ def summary_tag(marker: Marker) -> str:
 
 
 def export_summary(marker: Marker, cfg: Config, src: Path,
-                   transcript: list[dict], wav: Path | None = None) -> dict:
-    """요약 세로 영상을 만든다 (핵심요약 또는 3분요약)."""
+                   transcript: list[dict], wav: Path | None = None,
+                   look: dict | None = None,
+                   runs: list[tuple[float, float]] | None = None,
+                   tag: str | None = None) -> dict:
+    """요약 세로 영상을 만든다 (핵심요약 또는 3분요약).
+
+    look·runs 는 [숏폼 편집] 가 준다 (shorts.build 의 look 참고). 미리 보기에서
+    자막 그림의 시각을 runs 로 맞췄으므로 같은 runs 로 만들어야 어긋나지 않는다.
+    둘 다 없으면 예전과 똑같이 만든다.
+    """
     from . import shorts
 
-    runs = summary_runs(marker, cfg, transcript, wav)
+    if runs is None:
+        runs = summary_runs(marker, cfg, transcript, wav)
     total = sum(e - s for s, e in runs)
 
     cfg.ensure_dirs()
-    out = cfg.export_dir / f"{safe_stem(marker, '_' + summary_tag(marker))}.mp4"
+    out = cfg.export_dir / f"{safe_stem(marker, '_' + (tag or summary_tag(marker)))}.mp4"
+    if Path(src).resolve() == out.resolve():          # 연 파일을 덮어쓰지 않는다
+        out = out.with_name(out.stem + "_새로.mp4")
 
     ranges = [(s, e, "summary") for s, e in runs]
     srt_text = build_srt(ranges, [e - s for s, e in runs], transcript)
 
-    verse = _guess_verse(transcript, marker)
+    # 사람이 고친 본문이 있으면 그걸 쓴다 ([음성 설교] 칸에서 고칠 수 있다).
+    verse = getattr(marker, "sermon_verse", "") or _guess_verse(transcript, marker)
     voice = voice_audio(marker, cfg, src)
     say_audio_steps(cfg, voice)
     shorts.build(Path(src), runs, out, cfg,
                  title=marker.sermon_title or "", verse=verse, srt_text=srt_text,
-                 audio_src=voice, level_wav=wav)
+                 audio_src=voice, level_wav=wav, look=look)
 
     return {
         "video": out,
@@ -275,7 +287,7 @@ def export_summary_mp3(marker: Marker, cfg: Config, src: Path,
             "artist": "창의진교회",
             "date": (marker.upload_date or "")[:4],
             "genre": "Speech",
-            "comment": _guess_verse(transcript, marker),
+            "comment": getattr(marker, "sermon_verse", "") or _guess_verse(transcript, marker),
         },
     )
     return {

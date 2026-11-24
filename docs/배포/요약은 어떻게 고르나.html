@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>요약은 어떻게 고르나</title>
+<style>
+  :root{
+    --ink:#1b1b1f; --dim:#5d6068; --line:#e2e3e8; --bg:#ffffff;
+    --soft:#f6f7f9; --mark:#1d4ed8;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --ink:#e8e9ed; --dim:#a2a6b0; --line:#32353d; --bg:#17181c;
+      --soft:#1f2127; --mark:#7aa2ff;
+    }
+  }
+  :root[data-theme="dark"]{
+    --ink:#e8e9ed; --dim:#a2a6b0; --line:#32353d; --bg:#17181c;
+    --soft:#1f2127; --mark:#7aa2ff;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:"Malgun Gothic","맑은 고딕",system-ui,sans-serif;
+    font-size:17px; line-height:1.75; word-break:keep-all;
+  }
+  .wrap{max-width:720px; margin:0 auto; padding:48px 16px 96px}
+  h1{font-size:28px; line-height:1.35; margin:0 0 6px; letter-spacing:-.02em}
+  .sub{color:var(--dim); margin:0 0 40px}
+  h2{font-size:21px; margin:48px 0 14px; padding-top:20px; border-top:1px solid var(--line); letter-spacing:-.01em}
+  h3{font-size:17px; margin:26px 0 8px}
+  p{margin:0 0 14px}
+  table{width:100%; border-collapse:collapse; margin:16px 0; font-size:16px}
+  th,td{text-align:left; padding:9px 10px; border-bottom:1px solid var(--line); vertical-align:top}
+  th{color:var(--dim); font-weight:600; white-space:nowrap}
+  .flow{list-style:none; counter-reset:f; padding:0; margin:20px 0}
+  .flow li{counter-increment:f; position:relative; padding:0 0 20px 46px; border-left:2px solid var(--line); margin-left:14px}
+  .flow li:last-child{border-left-color:transparent; padding-bottom:0}
+  .flow li::before{
+    content:counter(f); position:absolute; left:-15px; top:0;
+    width:28px; height:28px; border-radius:50%; background:var(--mark); color:#fff;
+    display:flex; align-items:center; justify-content:center; font-size:14px; font-weight:700;
+  }
+  .flow b{display:block; margin-bottom:2px}
+  .note{background:var(--soft); border-left:3px solid var(--line);
+        padding:14px 16px; margin:18px 0; border-radius:0 8px 8px 0}
+  ul{margin:0 0 14px; padding-left:22px}
+  li{margin:0 0 6px}
+  .bar{display:flex; height:30px; border-radius:6px; overflow:hidden; margin:10px 0 6px; font-size:13px}
+  .bar div{display:flex; align-items:center; justify-content:center; color:#fff; white-space:nowrap}
+  .b1{background:#7c8aa5} .b2{background:#1d4ed8} .b3{background:#3f8f5e}
+  .cap{color:var(--dim); font-size:14px; margin:0 0 22px}
+  .end{margin-top:56px; padding-top:20px; border-top:1px solid var(--line); color:var(--dim); font-size:15px}
+  @media print{ body{font-size:11pt} .wrap{padding:0} h2{page-break-after:avoid} }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>요약은 어떻게 고르나</h1>
+<p class="sub">36분 설교에서 1분 40초를 어떤 기준으로 골라내는지 적어 둡니다.</p>
+
+<h2>두 가지 형식</h2>
+<p>
+  짧은 영상을 보는 사람은 설교를 처음부터 듣지 않습니다. 끝까지 보게 하려면
+  <b>무엇을 명심하고 살아갈지</b> 가 남아야 합니다. 그래서 요약은 설교를 줄인 것이 아니라,
+  설교 전체를 듣고 싶게 만드는 <b>초대</b> 에 가깝게 짰습니다.
+</p>
+
+<h3>핵심요약 — 1분 40초</h3>
+<div class="bar">
+  <div class="b2" style="flex:55">핵심 55%</div>
+  <div class="b3" style="flex:45">적용 45%</div>
+</div>
+<p class="cap">인스타 릴스용. 설명을 걷어내고 명제와 권면만 남깁니다.</p>
+
+<h3>3분요약 — 2분 50초</h3>
+<div class="bar">
+  <div class="b1" style="flex:25">문제 제기 25%</div>
+  <div class="b2" style="flex:45">핵심 45%</div>
+  <div class="b3" style="flex:30">적용 30%</div>
+</div>
+<p class="cap">
+  유튜브 쇼츠용. 쇼츠는 3분까지만 쇼츠로 쳐 주기 때문에 2분 50초를 목표로 둡니다.
+  10초는 여유로 남겨 둔 것입니다.
+</p>
+
+<h2>고르는 차례</h2>
+<ol class="flow">
+  <li>
+    <b>말을 글로 옮깁니다</b>
+    설교 소리를 받아쓰고 문장 단위로 나눕니다. 이 컴퓨터 안에서 돌아갑니다.
+  </li>
+  <li>
+    <b>문단으로 나눕니다</b>
+    목사님이 2초 넘게 쉬는 자리를 문단의 경계로 봅니다. 사람이 숨을 고르는 자리가
+    곧 이야기가 바뀌는 자리입니다.
+  </li>
+  <li>
+    <b>문단마다 역할을 매깁니다</b>
+    문제 제기 · 핵심 · 예화 · 적용 · 설명 · 성경 봉독 · 안내 중 무엇인지 매깁니다.
+    낱말과 설교 안에서의 자리로 밑그림을 그리고, AI 모델이 있으면 그 밑그림을 고칩니다.
+  </li>
+  <li>
+    <b>칸을 채웁니다</b>
+    형식에 맞는 칸(핵심·적용 같은)을 만들고, 칸마다 역할이 맞는 문단 중에서 고릅니다.
+    칸끼리 같은 대목을 가져가지 않게 앞 칸부터 차례로 정합니다.
+  </li>
+  <li>
+    <b>길이를 맞춥니다</b>
+    목표 길이에 닿을 때까지 문장을 넣고 뺍니다.
+  </li>
+  <li>
+    <b>자를 자리를 다듬습니다</b>
+    문장 경계 그대로 자르면 말꼬리가 잘립니다. 그래서 소리에서 쉼을 따로 찾아
+    쉼에 맞춰 자릅니다. 말이 끝나고 0.3초쯤 여운을 남깁니다.
+  </li>
+</ol>
+
+<div class="note">
+  <b>어디를 보고 고르나.</b>
+  되풀이되는 말, 번호를 붙여 선언한 대목("첫째는…"), 권면하는 말투("~합시다", "~바랍니다"),
+  설교 안에서의 자리를 봅니다. 성경 봉독과 안내("오늘 본문은 몇 절입니다")는 걸러 냅니다.
+  뜻이 가까운 문장을 찾는 모델이 있으면, 낱말이 달라도 설교 전체를 대표하는 문장을 찾아냅니다.
+</div>
+
+<h2>고른 뒤 소리를 다듬습니다</h2>
+<table>
+  <tr><th>울림 줄이기</th><td>예배당은 울려서 말꼬리가 뭉칩니다. 늦게 돌아오는 울림을 줄입니다.</td></tr>
+  <tr><th>또렷하게</th><td>발음이 실리는 음역을 올리고 웅웅거리는 음역을 내립니다.</td></tr>
+  <tr><th>말 사이 소음</th><td>말이 없는 동안의 잡음을 눌러 줍니다. 말꼬리의 여운은 남기고 천천히 닫습니다.</td></tr>
+  <tr><th>크기 고르게</th><td>문장마다 소리 크기를 재어, 작게 말한 문장을 끌어올립니다. 다만 차이의 7할까지만 — 다 펴면 힘주어 말한 대목의 울림이 사라집니다.</td></tr>
+  <tr><th>음량 맞추기</th><td>마지막에 방송·유튜브 표준(-16 LUFS)에 맞춥니다.</td></tr>
+</table>
+
+<h2>화면은 이렇게 만듭니다</h2>
+<p>
+  세로 1080×1920 화면입니다. 원본에서 목사님이 서 계신 자리만 잘라 키워 가운데에 놓고,
+  위에는 설교 제목과 성경 구절, 아래에는 자막을 넣습니다.
+  영상이 작게 잘리므로 키울 때 압축 자국이 같이 커지지 않도록, 키우기 전에 한 번 다듬고
+  키운 뒤에 윤곽만 되살립니다.
+</p>
+
+<h2>사람이 해야 하는 일</h2>
+<p>
+  프로그램이 고른 것은 <b>밑그림</b> 입니다. 설교를 들은 사람이 보기에 맥이 끊기거나
+  오해를 살 만한 대목은 사람이 빼야 합니다. 특히 이런 것들을 봐 주세요.
+</p>
+<ul>
+  <li>앞 문장 없이 들으면 뜻이 달라지는 대목</li>
+  <li>교인만 아는 이야기나 이름이 들어간 대목</li>
+  <li>예화의 가운데만 잘려 들어가 앞뒤가 없는 대목</li>
+  <li>말은 좋은데 설교의 주제와 어긋나는 대목</li>
+</ul>
+<p>
+  <b>요약 미리보기</b> 로 고른 대목만 이어서 들어 보시면 이런 것이 금방 드러납니다.
+</p>
+
+<div class="note">
+  <b>쓸수록 좋아집니다.</b>
+  사람이 확정한 요약은 따로 기록해 둡니다. 그 기록이 쌓이면 이 교회 설교에 맞게
+  AI를 다시 학습시킬 수 있습니다. 지금 들어 있는 AI 모델도 그렇게 만든 것입니다.
+</div>
+
+<p class="end">
+  쓰는 방법은 같은 폴더의 <b>사용설명서</b> 를 보세요.<br>
+  창의진교회 설교영상 편집기
+</p>
+
+</div>
+</body>
+</html>

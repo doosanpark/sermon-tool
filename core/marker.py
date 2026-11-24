@@ -42,6 +42,16 @@ class Marker:
 
     # 설교 제목 — 사람이 적는다. 내보낼 파일 이름에 쓰인다.
     sermon_title: str = ""
+    # 본문 성구 (예: "창세기 12:1-4") — 사람이 고친 것. 비어 있으면 자막에서 짐작한다.
+    # [음성 설교] 칸에서 고칠 수 있고, 요약 영상 위쪽에도 이 글자가 들어간다.
+    sermon_verse: str = ""
+    # 음성 설교(화면 없이 소리만)로 다룰지 — 사람이 [음성 설교] 칸을 누른 것만 적는다.
+    # None 이면 아직 안 정했다는 뜻이고, 열 때마다 프로그램이 알아본다.
+    audio_sermon: bool | None = None
+    # [음성 설교] 편집기 타임라인의 장면들 (core/visual.new_item 사전). 순서대로 깔린다.
+    visual_items: list[dict] = field(default_factory=list)
+    # [숏폼 편집] 의 끌리는 제목 (화면에 크게 얹는 쉬운 제목). 비면 설교 제목.
+    reel_hook: str = ""
 
     # 편집 구간 — 사람이 GUI에서 추가/삭제한 구간 목록.
     # 비어 있지 않으면 sermon/bene 대신 이 목록을 내보낸다.

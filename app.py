@@ -929,7 +929,7 @@ class MainWindow(SummaryTab, QWidget):
         noise_row = QHBoxLayout()
         noise_row.addWidget(QLabel("잡음 제거"))
         self.denoise_box = QComboBox()
-        self.denoise_box.addItems(["약하게 (권장)", "강하게", "끔"])
+        self.denoise_box.addItems(["끔", "약하게", "강하게"])
         self.denoise_box.setToolTip(
             "예배 방송에 섞인 웅웅거리는 잡음(마이크 험·에어컨)을 줄입니다.\n"
             "약하게: 잡음 13dB 감소, 목소리 손상 거의 없음\n"
@@ -938,21 +938,18 @@ class MainWindow(SummaryTab, QWidget):
         noise_row.addWidget(self.denoise_box, 1)
         adv.addLayout(noise_row)
 
-        self.voice_check = QCheckBox("말소리 다듬기 (권장)")
-        self.voice_check.setChecked(True)
+        self.voice_check = QCheckBox("말소리 다듬기")
         self.voice_check.setToolTip(
             "예배당 울림을 줄이고 목소리를 또렷하게 다듬습니다.\n"
             "설교 영상·mp3·3분 요약에 모두 들어갑니다.\n"
             "  · 울림 줄이기: 예배당에서 말꼬리가 뭉치는 것을 줄입니다 (잡음 제거와 다릅니다)\n"
             "  · 발음대 강조: 말이 또렷해집니다. 휴대폰 스피커에서 특히 다릅니다\n"
             "  · 말 사이 소음 누르기\n"
-            "소리 크기는 따로 맞추므로, 켜고 끄며 들어 봐도 크기 차이로 헷갈리지 않습니다.\n"
             "울림 줄이기는 36분 설교에 1분쯤 걸리고, 한 번 하면 다시 쓰므로\n"
             "같은 설교의 두 번째 내보내기부터는 시간이 들지 않습니다.")
         adv.addWidget(self.voice_check)
 
-        self.normalize_check = QCheckBox("소리 크기 맞추기 (권장)")
-        self.normalize_check.setChecked(True)
+        self.normalize_check = QCheckBox("소리 크기 맞추기")
         self.normalize_check.setToolTip(
             "예배 방송은 소리가 작게 녹음되는 경우가 많습니다.\n"
             "방송·유튜브 표준 음량(-16 LUFS)에 맞춰 키웁니다.\n"
@@ -1782,7 +1779,7 @@ class MainWindow(SummaryTab, QWidget):
         else:
             self._update_ai_status()      # [모델 받기] 는 필요할 때만 켠다
 
-    DENOISE_CHOICES = {"약하게 (권장)": "light", "강하게": "strong", "끔": ""}
+    DENOISE_CHOICES = {"끔": "", "약하게": "light", "강하게": "strong"}
     SUBTITLE_CHOICES = {
         "껐다 켤 수 있게 (권장)": "embed",
         "항상 보이게 (느림)": "burn",
@@ -1795,13 +1792,13 @@ class MainWindow(SummaryTab, QWidget):
         # 값을 먼저 전부 읽는다. 하나씩 읽으면서 위젯에 넣으면, 위젯이 바뀌며
         # _save_prefs 가 불려 아직 읽지 않은 값을 지워 버린다.
         sub = str(st.value("subtitle_mode", "embed"))
-        den = str(st.value("denoise", "light"))
-        normalize = st.value("normalize", True, type=bool)
+        den = str(st.value("denoise", ""))
+        normalize = st.value("normalize", False, type=bool)
         include_bene = st.value("include_bene", False, type=bool)
         intro = str(st.value("intro_path", "") or "")
         pick = str(st.value("pick_mode", "embed"))
         fmt = str(st.value("summary_format", "two"))
-        voice = st.value("voice_fx", True, type=bool)
+        voice = st.value("voice_fx", False, type=bool)
         th = saved_theme()
 
         widgets = (self.subtitle_box, self.denoise_box,
@@ -1848,7 +1845,7 @@ class MainWindow(SummaryTab, QWidget):
         s.setValue("subtitle_mode",
                    self.SUBTITLE_CHOICES.get(self.subtitle_box.currentText(), "embed"))
         s.setValue("denoise",
-                   self.DENOISE_CHOICES.get(self.denoise_box.currentText(), "light"))
+                   self.DENOISE_CHOICES.get(self.denoise_box.currentText(), ""))
         s.setValue("normalize", self.normalize_check.isChecked())
         if hasattr(self, "voice_check"):
             s.setValue("voice_fx", self.voice_check.isChecked())
@@ -1896,7 +1893,7 @@ class MainWindow(SummaryTab, QWidget):
         cfg = Config()
         if hasattr(self, "normalize_check"):
             cfg.normalize_audio = self.normalize_check.isChecked()
-            cfg.denoise = self.DENOISE_CHOICES.get(self.denoise_box.currentText(), "light")
+            cfg.denoise = self.DENOISE_CHOICES.get(self.denoise_box.currentText(), "")
         if hasattr(self, "voice_check"):
             on = self.voice_check.isChecked()
             cfg.enhance_speech = on

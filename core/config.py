@@ -99,15 +99,15 @@ class Config:
     # 교회 라이브 방송은 마이크 레벨이 낮게 잡혀 평균 -40dB 로 송출되는 경우가 있다.
     # 방송·유튜브 표준(-16 LUFS)에 맞춰 올려 준다. 영상은 그대로 두고 소리만 다시
     # 인코딩하므로 몇 십 초면 끝난다.
-    normalize_audio: bool = True
+    normalize_audio: bool = False
     # 잡음 제거: "" (끔) / "light" / "strong"
     # 예배 방송의 웅웅거리는 정상 잡음(마이크 험·에어컨)에는 FFT 방식이 잘 듣는다.
-    denoise: str = "light"
+    denoise: str = ""
     # --- 말소리 다듬기 (2026-10-19) ---
     # FilmCraft(MIT/Apache-2.0) 의 Enhance Speech · DeReverb 를 옮긴 것.
     # 예배당은 울려서 말꼬리가 뭉친다. ffmpeg 에는 울림 제거 필터가 없어 numpy 로
     # 따로 처리한다(core/voicefx.py). 설교 영상·mp3·3분 요약에 모두 쓴다.
-    enhance_speech: bool = True       # 발음대 강조 + 말 사이 소음 누르기 (ffmpeg 필터)
+    enhance_speech: bool = False      # 발음대 강조 + 말 사이 소음 누르기 (ffmpeg 필터)
     # 0 이면 울림 줄이기를 끈다. 0.5 는 2026-10-19 에 전·후를 들어 보고 고른 값
     # (0.8 은 더 세게 깎지만 사람 귀에 이득이 뚜렷하지 않았다).
     dereverb_amount: float = 0.5

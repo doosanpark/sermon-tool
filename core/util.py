@@ -261,6 +261,7 @@ def run(cmd: list[str]) -> str:
             encoding="utf-8",
             errors="replace",
             env=tool_env(),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except OSError as exc:
         # 메모리가 모자라 프로세스를 못 띄운 것이면, 무슨 일인지 알아듣게 바꿔 준다.
@@ -320,6 +321,7 @@ def run_stream(cmd: list[str], tag: str = "", pct_step: float = 2.0,
         bufsize=1,
         env=tool_env(),
         cwd=str(cwd) if cwd else None,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
 
     collected: list[str] = []

@@ -180,6 +180,8 @@ def voice_audio(marker: Marker, cfg: Config, src: Path) -> Path | None:
     네 가지 내보내기(설교 영상·설교 mp3·3분 요약 영상·3분 요약 mp3)가 모두 이
     함수를 부른다. 결과는 data/cache 에 남으므로 두 번째부터는 다시 계산하지 않는다.
     """
+    if not cfg.enhance_speech:
+        return None
     try:
         from . import voicefx
         return voicefx.voice_wav(Path(src), cfg, marker.video_id)
